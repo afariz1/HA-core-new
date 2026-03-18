@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -22,6 +23,8 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import PhotoptimizerCoordinator
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -272,6 +275,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up Photoptimizer sensor entities."""
     coordinator: PhotoptimizerCoordinator = hass.data[DOMAIN][entry.entry_id]
+    _LOGGER.debug(
+        "Setting up sensor platform for entry_id=%s with %s sensors",
+        entry.entry_id,
+        len(SENSOR_TYPES),
+    )
 
     async_add_entities(
         PhotoptimizerSensor(coordinator, entry, description)
@@ -295,6 +303,11 @@ class PhotoptimizerSensor(CoordinatorEntity[PhotoptimizerCoordinator], SensorEnt
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        _LOGGER.debug(
+            "Created sensor entity key=%s unique_id=%s",
+            description.key,
+            self._attr_unique_id,
+        )
 
     @property
     def native_value(self) -> StateType:

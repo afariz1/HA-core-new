@@ -124,6 +124,15 @@ class EmhassClient:
                 "friendly_name": "EMHASS optimization status",
             },
         }
+        _LOGGER.debug(
+            "EMHASS client initialized: url=%s token=%s battery_capacity_wh=%s efficiency=%s soc_reserve=%s wear_cost=%s",
+            self._url,
+            "set" if self._token else "unset",
+            self._battery_nominal_energy_capacity,
+            self._battery_efficiency,
+            self._battery_soc_reserve,
+            self._wear_cost_per_kwh,
+        )
 
     def _headers(self) -> dict[str, str]:
         """Return headers for EMHASS HTTP requests."""
@@ -140,12 +149,16 @@ class EmhassClient:
         - 2xx/3xx means healthy
         - 4xx often means auth/config mismatch, but server is up
         """
+        _LOGGER.debug("Checking EMHASS reachability for %s at %s", label, url)
         try:
             async with self._session.get(
                 url,
                 headers=self._headers(),
                 timeout=ClientTimeout(total=5),
             ) as response:
+                _LOGGER.debug(
+                    "Reachability check status for %s: %s", label, response.status
+                )
                 if response.status < 500:
                     return True
                 _LOGGER.error("%s unreachable (%s)", label, response.status)
@@ -168,6 +181,13 @@ class EmhassClient:
         failures where follow-up processing should stop.
         """
         endpoint = f"{self._url}/action/{action}"
+        _LOGGER.debug(
+            "Calling EMHASS action=%s endpoint=%s payload_keys=%s timeout=%s",
+            action,
+            endpoint,
+            sorted(payload.keys()),
+            timeout,
+        )
 
         try:
             async with self._session.post(
@@ -260,6 +280,12 @@ class EmhassClient:
 
         # Future enhancement: map real inverter and battery power limits once the
         # integration exposes charge/discharge capability data.
+        _LOGGER.debug(
+            "Built runtimeparams: horizon=%s step=%s keys=%s",
+            inputs.prediction_horizon,
+            inputs.optimization_time_step_minutes,
+            sorted(runtimeparams.keys()),
+        )
         return runtimeparams
 
     def _build_publish_payload(
@@ -270,7 +296,7 @@ class EmhassClient:
         We explicitly pass entity descriptors so EMHASS writes predictable
         entities that this integration can read afterwards.
         """
-        return {
+        payload = {
             # Both must match the values used during naive-mpc-optim so that
             # publish-data reads opt_res_latest.csv with the correct frequency
             # and does not try to publish deferrable load columns that don't exist.
@@ -288,6 +314,12 @@ class EmhassClient:
             "custom_cost_fun_id": self._published_entities["cost_fun"],
             "custom_optim_status_id": self._published_entities["optim_status"],
         }
+        _LOGGER.debug(
+            "Built publish payload: optimization_time_step=%s keys=%s",
+            optimization_time_step_minutes,
+            sorted(payload.keys()),
+        )
+        return payload
 
     def _read_published_entities(self) -> dict[str, PublishedEntityState]:
         """Read EMHASS-published entities from the local HA state machine.
@@ -308,6 +340,11 @@ class EmhassClient:
                 attributes={} if state is None else dict(state.attributes),
             )
 
+        _LOGGER.debug(
+            "Read published entities snapshot: available=%s total=%s",
+            sum(1 for entity in snapshots.values() if entity.state is not None),
+            len(snapshots),
+        )
         return snapshots
 
     def _log_published_entities(
@@ -330,7 +367,9 @@ class EmhassClient:
         This endpoint updates EMHASS optimization artifacts (for example
         opt_res_latest.csv) but does not publish entities to Home Assistant.
         """
+        _LOGGER.debug("Starting EMHASS naive optimization")
         if not await self._async_check_url(self._url, "EMHASS base"):
+            _LOGGER.debug("EMHASS naive optimization aborted: base URL unreachable")
             return None
 
         runtimeparams = self._build_runtimeparams(inputs)
@@ -340,8 +379,10 @@ class EmhassClient:
             timeout=60,
         )
         if optimization_response is None:
+            _LOGGER.debug("EMHASS naive optimization failed: no response")
             return None
 
+        _LOGGER.debug("EMHASS naive optimization finished successfully")
         return {
             "runtimeparams": runtimeparams,
             "optimization_response": optimization_response,
@@ -351,7 +392,9 @@ class EmhassClient:
         self, optimization_time_step_minutes: int
     ) -> dict[str, Any] | None:
         """Run only the EMHASS publish step and read back published entities."""
+        _LOGGER.debug("Starting EMHASS publish-data")
         if not await self._async_check_url(self._url, "EMHASS base"):
+            _LOGGER.debug("EMHASS publish-data aborted: base URL unreachable")
             return None
 
         publish_response = await self._async_post_action(
@@ -360,11 +403,13 @@ class EmhassClient:
             timeout=30,
         )
         if publish_response is None:
+            _LOGGER.debug("EMHASS publish-data failed: no response")
             return None
 
         await self._hass.async_block_till_done()
         published_entities = self._read_published_entities()
         self._log_published_entities(published_entities)
+        _LOGGER.debug("EMHASS publish-data finished successfully")
 
         return {
             "publish_response": publish_response,
@@ -385,16 +430,20 @@ class EmhassClient:
 
         Returns ``None`` if any mandatory step fails.
         """
+        _LOGGER.debug("Starting full EMHASS naive MPC cycle")
         optimization_result = await self.async_run_naive_optimization(inputs)
         if optimization_result is None:
+            _LOGGER.debug("Naive MPC cycle failed during optimization step")
             return None
 
         publish_result = await self.async_publish_data(
             inputs.optimization_time_step_minutes
         )
         if publish_result is None:
+            _LOGGER.debug("Naive MPC cycle failed during publish step")
             return None
 
+        _LOGGER.debug("Full EMHASS naive MPC cycle finished successfully")
         return EmhassExecutionResult(
             runtimeparams=optimization_result["runtimeparams"],
             optimization_response=optimization_result["optimization_response"],

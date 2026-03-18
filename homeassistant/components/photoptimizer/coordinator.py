@@ -14,7 +14,7 @@ from homeassistant.components.recorder.statistics import (
     statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -99,6 +99,12 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_optimization_response: dict[str, Any] = {}
         self._last_publish_response: dict[str, Any] = {}
         self._last_published_entities: dict[str, PublishedEntityState] = {}
+        _LOGGER.debug(
+            "Coordinator initialized for entry_id=%s emhass_url=%s token=%s",
+            entry.entry_id,
+            self.emhass_url,
+            "set" if self.emhass_token else "unset",
+        )
 
     def _coerce_float(self, value: object) -> float | None:
         """Convert arbitrary value to float when possible."""
@@ -108,6 +114,32 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             except ValueError:
                 return None
 
+        return None
+
+    async def _async_get_state_with_startup_wait(self, entity_id: str) -> State | None:
+        """Return entity state, waiting briefly during startup for late entities."""
+        state = self.hass.states.get(entity_id)
+        if state is not None or self.hass.is_running:
+            if state is None:
+                _LOGGER.debug(
+                    "Entity %s unavailable (system already running)", entity_id
+                )
+            return state
+
+        _LOGGER.debug("Entity %s missing during startup, waiting up to 8s", entity_id)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 8.0
+
+        while loop.time() < deadline:
+            await asyncio.sleep(0.25)
+            state = self.hass.states.get(entity_id)
+            if state is not None:
+                _LOGGER.debug(
+                    "Entity %s became available during startup wait", entity_id
+                )
+                return state
+
+        _LOGGER.debug("Entity %s not available after startup wait", entity_id)
         return None
 
     def _extract_would_apply(
@@ -203,6 +235,12 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         tz_name = self.entry.data.get(CONF_TIMEZONE) or self.hass.config.time_zone
         tz = dt_util.get_time_zone(tz_name) or dt_util.UTC
         now = dt_util.now(tz).replace(minute=0, second=0, microsecond=0)
+        _LOGGER.debug(
+            "Collecting inputs: horizon_hours=%s timezone=%s start=%s",
+            horizon_hours,
+            tz_name,
+            now.isoformat(),
+        )
 
         for hour_offset in range(horizon_hours):
             bucket_start = now + timedelta(hours=hour_offset)
@@ -217,22 +255,33 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         price_entity = self.entry.data.get(CONF_ELECTRICITY_PRICE_ENTITY)
         if price_entity:
+            _LOGGER.debug("Using electricity price entity: %s", price_entity)
             await self._hourly_from_price_entity(price_entity, timeline)
+        else:
+            _LOGGER.debug("No electricity price entity configured")
 
         pv_entity = self.entry.data.get(CONF_PV_FORECAST_ENTITY)
         raw_pv = None
         if pv_entity:
+            _LOGGER.debug("Using PV forecast entity: %s", pv_entity)
             await self._hourly_from_pv_entity(pv_entity, timeline)
         else:
+            _LOGGER.debug("Using Forecast.Solar client for PV forecast")
             raw_pv = await self.client.estimate()
             await self._hourly_from_forecast_solar(timeline, raw_pv)
 
         load_entity = self.entry.data.get(CONF_LOAD_FORECAST_ENTITY)
         if load_entity:
+            _LOGGER.debug("Using load forecast entity: %s", load_entity)
             await self._hourly_from_load_entity(load_entity, timeline)
         else:
+            _LOGGER.debug("No load forecast entity configured, building profile")
             load_profile = await self._build_load_profile(None)
             await self._hourly_from_load_profile(timeline, load_profile)
+
+        _LOGGER.debug(
+            "Input collection finished with %s timeline buckets", len(timeline)
+        )
 
         return (
             OptimizationInputs(
@@ -246,7 +295,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     async def _hourly_from_price_entity(
         self, entity_id: str, buckets: list[OptimizationBucket]
     ) -> None:
-        state = self.hass.states.get(entity_id)
+        state = await self._async_get_state_with_startup_wait(entity_id)
 
         if state is None:
             raise UpdateFailed(f"Price entity {entity_id} not found")
@@ -255,6 +304,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         tz = dt_util.get_time_zone(tz_name) or dt_util.UTC
 
         bucket_index = {bucket.start: bucket for bucket in buckets}
+        mapped_points = 0
 
         for key, value in state.attributes.items():
             if isinstance(value, (int, float)):
@@ -265,18 +315,28 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 hour_start = dt_local.replace(minute=0, second=0, microsecond=0)
                 if hour_start in bucket_index:
                     bucket_index[hour_start].price = float(value)
+                    mapped_points += 1
 
         last_price: float | None = None
+        filled_points = 0
         for bucket in buckets:
             if bucket.price != 0.0:
                 last_price = bucket.price
             elif last_price is not None:
                 bucket.price = last_price
+                filled_points += 1
+
+        _LOGGER.debug(
+            "Price timeline populated from %s: mapped=%s forward_filled=%s",
+            entity_id,
+            mapped_points,
+            filled_points,
+        )
 
     async def _hourly_from_load_entity(
         self, entity_id: str, buckets: list[OptimizationBucket]
     ) -> None:
-        state = self.hass.states.get(entity_id)
+        state = await self._async_get_state_with_startup_wait(entity_id)
 
         if state is None:
             raise UpdateFailed(f"Load entity {entity_id} not found")
@@ -285,6 +345,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         tz = dt_util.get_time_zone(tz_name) or dt_util.UTC
 
         bucket_index = {bucket.start: bucket for bucket in buckets}
+        mapped_points = 0
 
         for key, value in state.attributes.items():
             if not isinstance(value, (int, float)):
@@ -296,13 +357,23 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             hour_start = dt_local.replace(minute=0, second=0, microsecond=0)
             if hour_start in bucket_index:
                 bucket_index[hour_start].load = float(value) / 1000.0
+                mapped_points += 1
 
         last_load: float | None = None
+        filled_points = 0
         for bucket in buckets:
             if bucket.load != 0.0:
                 last_load = bucket.load
             elif last_load is not None:
                 bucket.load = last_load
+                filled_points += 1
+
+        _LOGGER.debug(
+            "Load timeline populated from %s: mapped=%s forward_filled=%s",
+            entity_id,
+            mapped_points,
+            filled_points,
+        )
 
     async def _hourly_from_forecast_solar(
         self, buckets: list[OptimizationBucket], raw_pv
@@ -311,25 +382,32 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         tz = dt_util.get_time_zone(tz_name) or dt_util.UTC
 
         bucket_index = {bucket.start: bucket for bucket in buckets}
+        mapped_points = 0
 
         for dt_utc, wh in raw_pv.wh_period.items():
             dt_local = dt_util.as_local(dt_utc).astimezone(tz)
             hour_start = dt_local.replace(minute=0, second=0, microsecond=0)
             if hour_start in bucket_index:
                 bucket_index[hour_start].pv += float(wh) / 1000.0
+            mapped_points += 1
+
+        _LOGGER.debug(
+            "PV timeline populated from Forecast.Solar: mapped=%s", mapped_points
+        )
 
     async def _hourly_from_pv_entity(
         self, entity_id: str, buckets: list[OptimizationBucket]
     ) -> None:
         """Fill PV from a forecast entity with datetime-keyed attributes."""
 
-        state = self.hass.states.get(entity_id)
+        state = await self._async_get_state_with_startup_wait(entity_id)
         if state is None:
             raise UpdateFailed(f"PV forecast entity {entity_id} not found")
 
         tz_name = self.entry.data.get(CONF_TIMEZONE) or self.hass.config.time_zone
         tz = dt_util.get_time_zone(tz_name) or dt_util.UTC
         bucket_index = {bucket.start: bucket for bucket in buckets}
+        mapped_points = 0
 
         for key, value in state.attributes.items():
             if not isinstance(value, (int, float)):
@@ -344,6 +422,11 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 if val > 50:
                     val = val / 1000.0
                 bucket_index[hour_start].pv = val
+                mapped_points += 1
+
+        _LOGGER.debug(
+            "PV timeline populated from %s: mapped=%s", entity_id, mapped_points
+        )
 
     async def _hourly_from_load_profile(
         self, buckets: list[OptimizationBucket], profile: list[float]
@@ -352,6 +435,11 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         for bucket in buckets:
             bucket.load = profile[bucket.start.hour]
+
+        _LOGGER.debug(
+            "Load timeline populated from profile with %s hourly values",
+            len(profile),
+        )
 
     async def _build_load_profile(self, entity_id: str | None) -> list[float]:
         """Build a simple 24h load profile from history; fallback to defaults.
@@ -389,6 +477,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         ]
 
         if not entity_id:
+            _LOGGER.debug("Using default load profile (no entity configured)")
             return default_profile
 
         start = dt_util.utcnow() - timedelta(days=7)
@@ -413,6 +502,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             return default_profile
 
         rows = stats.get(entity_id) or []
+        _LOGGER.debug("Load stats query returned %s rows for %s", len(rows), entity_id)
         hourly_totals = [0.0] * 24
         hourly_counts = [0] * 24
 
@@ -443,6 +533,12 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             else:
                 profile.append(default_profile[hour])
 
+        _LOGGER.debug(
+            "Load profile built from stats for %s (filled_hours=%s)",
+            entity_id,
+            sum(1 for count in hourly_counts if count),
+        )
+
         return profile
 
     def _read_battery_soc(self) -> float:
@@ -457,7 +553,14 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         if soc_value > 1:
             soc_value = soc_value / 100.0
 
-        return max(0.0, min(1.0, soc_value))
+        normalized_soc = max(0.0, min(1.0, soc_value))
+        _LOGGER.debug(
+            "Battery SOC read from %s: raw=%s normalized=%s",
+            soc_entity,
+            None if soc_state is None else soc_state.state,
+            normalized_soc,
+        )
+        return normalized_soc
 
     def _log_timeline(self, timeline: list[OptimizationBucket]) -> None:
         """Log the aggregated inputs passed into EMHASS."""
@@ -480,11 +583,18 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         Scheduled tasks call optimization and publish actions explicitly.
         """
         try:
+            _LOGGER.debug("Coordinator refresh started")
             async with asyncio.timeout(30):
                 optimization_inputs, raw_pv = await self._async_collect_inputs()
                 if _LOGGER.isEnabledFor(logging.DEBUG):
                     self._log_timeline(optimization_inputs.timeline)
-                return self._build_result(optimization_inputs, raw_pv)
+                result = self._build_result(optimization_inputs, raw_pv)
+                _LOGGER.debug(
+                    "Coordinator refresh finished: horizon=%s step=%s",
+                    optimization_inputs.prediction_horizon,
+                    optimization_inputs.optimization_time_step_minutes,
+                )
+                return result
 
         except ForecastSolarError as err:
             raise UpdateFailed(f"Forecast.Solar API error: {err}") from err
@@ -492,6 +602,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     async def async_run_daily_optimization(self) -> None:
         """Run the daily EMHASS optimization at 17:00 schedule."""
         async with self._operation_lock:
+            _LOGGER.debug("Daily optimization started")
             try:
                 async with asyncio.timeout(90):
                     optimization_inputs, raw_pv = await self._async_collect_inputs()
@@ -515,12 +626,18 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                     self.async_set_updated_data(
                         self._build_result(optimization_inputs, raw_pv)
                     )
+                    _LOGGER.debug(
+                        "Daily optimization finished: runtimeparams_keys=%s response_keys=%s",
+                        sorted(self._last_runtimeparams.keys()),
+                        sorted(self._last_optimization_response.keys()),
+                    )
             except ForecastSolarError as err:
                 raise UpdateFailed(f"Forecast.Solar API error: {err}") from err
 
     async def async_run_hourly_publish(self) -> None:
         """Run the hourly EMHASS publish-data step."""
         async with self._operation_lock:
+            _LOGGER.debug("Hourly publish started")
             try:
                 async with asyncio.timeout(60):
                     optimization_inputs, raw_pv = await self._async_collect_inputs()
@@ -539,6 +656,11 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
                     self.async_set_updated_data(
                         self._build_result(optimization_inputs, raw_pv)
+                    )
+                    _LOGGER.debug(
+                        "Hourly publish finished: published_entities=%s response_keys=%s",
+                        sorted(self._last_published_entities.keys()),
+                        sorted(self._last_publish_response.keys()),
                     )
             except ForecastSolarError as err:
                 raise UpdateFailed(f"Forecast.Solar API error: {err}") from err

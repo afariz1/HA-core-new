@@ -42,6 +42,15 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_SENSITIVE_FIELDS = {CONF_API_KEY, CONF_EMHASS_TOKEN}
+
+
+def _redact_user_input(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Return log-safe copy of flow user input."""
+    return {
+        key: ("***" if key in _SENSITIVE_FIELDS and value else value)
+        for key, value in user_input.items()
+    }
 
 
 class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -58,8 +67,14 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Initial step: use baked-in defaults and continue."""
+        _LOGGER.debug("Config flow user step started")
         self._data[CONF_HORIZON_HOURS] = DEFAULT_HORIZON_HOURS
         self._data[CONF_RESOLUTION] = DEFAULT_RESOLUTION
+        _LOGGER.debug(
+            "Config flow defaults set: horizon_hours=%s resolution=%s",
+            self._data[CONF_HORIZON_HOURS],
+            self._data[CONF_RESOLUTION],
+        )
         return await self.async_step_electricity_price()
 
     async def async_step_electricity_price(
@@ -69,10 +84,16 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            _LOGGER.debug(
+                "Electricity price step received input: %s",
+                _redact_user_input(user_input),
+            )
             self._data.update(user_input)
-            _LOGGER.debug("Electricity price step")
+            _LOGGER.debug("Electricity price step completed")
 
             return await self.async_step_pv_forecast()
+
+        _LOGGER.debug("Showing electricity price form")
 
         data_schema = vol.Schema(
             {
@@ -101,15 +122,22 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            _LOGGER.debug(
+                "PV forecast step received input: %s",
+                _redact_user_input(user_input),
+            )
             self._data.update(user_input)
-            _LOGGER.debug("PV forecast step")
+            _LOGGER.debug("PV forecast step validating unique ID")
 
             # Set unique ID based on location and solar configuration
             unique_id = f"{user_input[CONF_LATITUDE]}_{user_input[CONF_LONGITUDE]}_{user_input[CONF_KWP]}"
             await self.async_set_unique_id(unique_id)
             self._abort_if_unique_id_configured()
+            _LOGGER.debug("PV forecast step completed with unique_id=%s", unique_id)
 
             return await self.async_step_load_forecast()
+
+        _LOGGER.debug("Showing PV forecast form")
 
         data_schema = vol.Schema(
             {
@@ -141,10 +169,16 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            _LOGGER.debug(
+                "Load forecast step received input: %s",
+                _redact_user_input(user_input),
+            )
             self._data.update(user_input)
-            _LOGGER.debug("Load forecast step")
+            _LOGGER.debug("Load forecast step completed")
 
             return await self.async_step_inverter()
+
+        _LOGGER.debug("Showing load forecast form")
 
         data_schema = vol.Schema(
             {
@@ -170,11 +204,21 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            _LOGGER.debug(
+                "Inverter step received input: %s",
+                _redact_user_input(user_input),
+            )
             self._data.update(user_input)
-            _LOGGER.debug("Inverter data step")
+            _LOGGER.debug("Inverter data step completed")
 
-            _LOGGER.info("Creating Photoptimizer entry with entities")
+            _LOGGER.info("Creating Photoptimizer config entry")
+            _LOGGER.debug(
+                "Config entry data keys: %s",
+                sorted(self._data.keys()),
+            )
             return self.async_create_entry(title="Photoptimizer", data=self._data)
+
+        _LOGGER.debug("Showing inverter form")
 
         data_schema = vol.Schema(
             {
@@ -234,8 +278,13 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Handle reconfiguration of EMHASS connection settings."""
         entry = self._get_reconfigure_entry()
+        _LOGGER.debug("Reconfigure step opened for entry_id=%s", entry.entry_id)
 
         if user_input is not None:
+            _LOGGER.debug(
+                "Reconfigure step received input: %s",
+                _redact_user_input(user_input),
+            )
             return self.async_update_reload_and_abort(
                 entry,
                 data_updates={
@@ -244,6 +293,7 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 },
             )
 
+        _LOGGER.debug("Showing reconfigure form for entry_id=%s", entry.entry_id)
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
