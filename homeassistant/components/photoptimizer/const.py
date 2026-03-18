@@ -9,7 +9,6 @@ CONF_TIMEZONE = "timezone"  # optional, defaults to Home Assistant timezone
 
 # Energy price
 CONF_ELECTRICITY_PRICE_ENTITY = "electricity_price_entity"  # required
-CONF_PRICE_INCLUDE_VAT = "price_include_vat"  # optional, default False
 
 # Forecasts
 CONF_LATITUDE = "latitude"
@@ -48,7 +47,6 @@ CONF_WEAR_COST_PER_KWH = "wear_cost_per_kwh"  # optional, default 0.0
 # Default values
 DEFAULT_HORIZON_HOURS = 24
 DEFAULT_RESOLUTION = "hourly"
-DEFAULT_PRICE_INCLUDE_VAT = False
 DEFAULT_BATTERY_SOC_RESERVE_PERCENT = 20.0
 DEFAULT_WEAR_COST_PER_KWH = 0.0
 DEFAULT_BATTERY_EFFICIENCY_ROUND_TRIP = 100.0

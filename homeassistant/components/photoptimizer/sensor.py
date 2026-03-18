@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 import logging
+from numbers import Real
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -73,7 +74,7 @@ def _emhass_table(index: int, field: str) -> Callable[[dict], StateType]:
     """Read a future value from a published EMHASS entity attribute table."""
 
     def _coerce_float(value: object) -> float | None:
-        if isinstance(value, (str, int, float)):
+        if isinstance(value, str) or (isinstance(value, Real) and not isinstance(value, bool)):
             try:
                 return float(value)
             except ValueError:
@@ -83,7 +84,9 @@ def _emhass_table(index: int, field: str) -> Callable[[dict], StateType]:
 
     def _sorted_schedule(attributes: dict[str, object]) -> list[tuple[datetime, float]]:
         schedule: list[tuple[datetime, float]] = []
-        now = dt_util.utcnow()
+        # EMHASS publishes on exact minute boundaries; rounding avoids missing
+        # the "current" bucket due to seconds drift.
+        now = dt_util.utcnow().replace(second=0, microsecond=0)
 
         for key, value in attributes.items():
             dt_value = dt_util.parse_datetime(str(key))
@@ -92,7 +95,7 @@ def _emhass_table(index: int, field: str) -> Callable[[dict], StateType]:
                 continue
 
             dt_utc = dt_util.as_utc(dt_value)
-            if dt_utc <= now:
+            if dt_utc < now:
                 continue
 
             schedule.append((dt_utc, numeric))
@@ -104,7 +107,26 @@ def _emhass_table(index: int, field: str) -> Callable[[dict], StateType]:
         published_entities = (data.get("emhass") or {}).get("published_entities") or {}
         battery_forecast = published_entities.get("battery_forecast") or {}
         attributes = battery_forecast.get("attributes") or {}
-        schedule = _sorted_schedule(attributes)
+        # EMHASS future values are exposed as nested attributes, e.g.
+        # {"p_batt_forecast": {"2026-03-18T22:00:00+00:00": 123.4, ...}}
+        # but we fall back to flat timestamp->value mapping if needed.
+        if isinstance(attributes, dict):
+            nested = attributes.get(field)
+            if isinstance(nested, dict):
+                table = nested
+            else:
+                # Fallback: if EMHASS uses a different top-level key, pick the
+                # first nested timestamp->value dict.
+                for maybe_table in attributes.values():
+                    if isinstance(maybe_table, dict):
+                        table = maybe_table
+                        break
+                else:
+                    table = attributes
+        else:
+            table = attributes
+
+        schedule = _sorted_schedule(table)
         if len(schedule) <= index:
             return None
 
@@ -136,6 +158,18 @@ def _emhass_current_state(key: str) -> Callable[[dict], StateType]:
             return round(float(state), 2) if state is not None else None
         except TypeError, ValueError:
             return None
+
+    return _fn
+
+
+def _emhass_current_state_str(key: str) -> Callable[[dict], StateType]:
+    """Read the current state of a published EMHASS entity as-is."""
+
+    def _fn(data: dict) -> StateType:
+        published_entities = (data.get("emhass") or {}).get("published_entities") or {}
+        entity = published_entities.get(key) or {}
+        state = entity.get("state")
+        return state if state is not None else None
 
     return _fn
 
@@ -247,7 +281,7 @@ SENSOR_TYPES: tuple[PhotoptimizerSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
-        value_fn=_emhass_current_state("battery_forecast"),
+        value_fn=_emhass_table(0, "p_batt_forecast"),
     ),
     PhotoptimizerSensorEntityDescription(
         key="emhass_battery_power_next_hour",
@@ -255,7 +289,65 @@ SENSOR_TYPES: tuple[PhotoptimizerSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
-        value_fn=_emhass_table(0, "p_batt_forecast"),
+        value_fn=_emhass_table(1, "p_batt_forecast"),
+    ),
+    PhotoptimizerSensorEntityDescription(
+        key="emhass_pv_forecast_now",
+        name="Photoptimizer EMHASS PV power forecast (now)",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        value_fn=_emhass_current_state("pv_forecast"),
+    ),
+    PhotoptimizerSensorEntityDescription(
+        key="emhass_load_forecast_now",
+        name="Photoptimizer EMHASS load power forecast (now)",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        value_fn=_emhass_current_state("load_forecast"),
+    ),
+    PhotoptimizerSensorEntityDescription(
+        key="emhass_grid_forecast_now",
+        name="Photoptimizer EMHASS grid power forecast (now)",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        value_fn=_emhass_current_state("grid_forecast"),
+    ),
+    PhotoptimizerSensorEntityDescription(
+        key="emhass_battery_soc_forecast_now",
+        name="Photoptimizer EMHASS battery SOC forecast (now)",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=PERCENTAGE,
+        value_fn=_emhass_current_state("battery_soc_forecast"),
+    ),
+    PhotoptimizerSensorEntityDescription(
+        key="emhass_unit_load_cost",
+        name="Photoptimizer EMHASS unit load cost",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="currency/kWh",
+        value_fn=_emhass_current_state("unit_load_cost"),
+    ),
+    PhotoptimizerSensorEntityDescription(
+        key="emhass_unit_prod_price",
+        name="Photoptimizer EMHASS unit production price",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="currency/kWh",
+        value_fn=_emhass_current_state("unit_prod_price"),
+    ),
+    PhotoptimizerSensorEntityDescription(
+        key="emhass_total_cost_fun_value",
+        name="Photoptimizer EMHASS total cost function value",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="currency",
+        value_fn=_emhass_current_state("cost_fun"),
+    ),
+    PhotoptimizerSensorEntityDescription(
+        key="emhass_optim_status",
+        name="Photoptimizer EMHASS optimization status",
+        native_unit_of_measurement="",
+        value_fn=_emhass_current_state_str("optim_status"),
     ),
     PhotoptimizerSensorEntityDescription(
         key="would_apply_battery_power",

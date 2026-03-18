@@ -19,7 +19,7 @@ from .const import DOMAIN
 from .coordinator import PhotoptimizerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-_PLATFORMS: list[Platform] = [Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
+_PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -95,6 +95,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _async_handle_daily_optimization() -> None:
         """Run daily optimization with error isolation."""
         _LOGGER.debug("Scheduled daily optimization triggered")
+        if not coordinator.optimizer_enabled:
+            _LOGGER.debug("Optimization disabled via switch; skipping daily optimization")
+            return
         try:
             await coordinator.async_run_daily_optimization()
             _LOGGER.debug("Scheduled daily optimization finished successfully")
@@ -104,6 +107,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _async_handle_hourly_publish() -> None:
         """Run hourly publish-data with error isolation."""
         _LOGGER.debug("Scheduled hourly publish triggered")
+        if not coordinator.optimizer_enabled:
+            _LOGGER.debug("Optimization disabled via switch; skipping hourly publish")
+            return
         try:
             await coordinator.async_run_hourly_publish()
             _LOGGER.debug("Scheduled hourly publish finished successfully")
@@ -113,6 +119,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _async_handle_startup_bootstrap() -> None:
         """Run startup sequence in strict order: optimize first, publish second."""
         _LOGGER.debug("Startup bootstrap started")
+        if not coordinator.optimizer_enabled:
+            _LOGGER.debug("Optimization disabled via switch; skipping startup bootstrap")
+            return
         try:
             await coordinator.async_run_daily_optimization()
             _LOGGER.debug("Startup bootstrap optimization finished")

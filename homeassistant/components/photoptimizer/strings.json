@@ -9,9 +9,8 @@
       "electricity_price": {
         "data": {
           "electricity_price_entity": "Electricity price entity",
-          "price_include_vat": "Prices include VAT"
         },
-        "description": "Select the electricity price entity and VAT.",
+        "description": "Select the electricity price entity.",
         "title": "Configure electricity spot price"
       },
       "inverter": {

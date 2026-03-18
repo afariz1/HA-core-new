@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 import logging
+from numbers import Real
 from typing import Any
 
 from forecast_solar import ForecastSolar, ForecastSolarError
@@ -99,6 +100,8 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_optimization_response: dict[str, Any] = {}
         self._last_publish_response: dict[str, Any] = {}
         self._last_published_entities: dict[str, PublishedEntityState] = {}
+        # Controlled by the integration switch; when disabled we skip scheduled runs.
+        self._optimizer_enabled: bool = True
         _LOGGER.debug(
             "Coordinator initialized for entry_id=%s emhass_url=%s token=%s",
             entry.entry_id,
@@ -106,9 +109,35 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             "set" if self.emhass_token else "unset",
         )
 
+    @property
+    def optimizer_enabled(self) -> bool:
+        """Return whether optimization/publish should run."""
+        return self._optimizer_enabled
+
+    async def async_set_optimizer_enabled(self, enabled: bool) -> None:
+        """Enable/disable optimization runs."""
+        self._optimizer_enabled = enabled
+
+    async def async_run_startup_bootstrap(self) -> None:
+        """Run daily optimization and then hourly publish."""
+        # The startup sequence should respect the current enable flag.
+        if not self._optimizer_enabled:
+            return
+
+        try:
+            await self.async_run_daily_optimization()
+        except UpdateFailed as err:
+            _LOGGER.warning("Startup EMHASS optimization failed: %s", err)
+            return
+
+        try:
+            await self.async_run_hourly_publish()
+        except UpdateFailed as err:
+            _LOGGER.warning("Startup EMHASS publish-data failed: %s", err)
+
     def _coerce_float(self, value: object) -> float | None:
         """Convert arbitrary value to float when possible."""
-        if isinstance(value, (str, int, float)):
+        if isinstance(value, str) or (isinstance(value, Real) and not isinstance(value, bool)):
             try:
                 return float(value)
             except ValueError:
@@ -164,21 +193,52 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         nearest_time: datetime | None = None
         nearest_value: float | None = None
-        now_utc = dt_util.utcnow()
+        # Round to the minute so we can match EMHASS timestamps that are
+        # typically published on exact minute boundaries.
+        now_utc = dt_util.utcnow().replace(second=0, microsecond=0)
 
-        for key, value in battery_entity.attributes.items():
+        # EMHASS exposes future values as nested attributes, e.g.
+        # {"p_batt_forecast": {"2026-03-18T22:00:00+00:00": 123.4, ...}}
+        # but sometimes it may also be a flat timestamp->value mapping.
+        attr_table: dict[str, Any] = {}
+        if isinstance(battery_entity.attributes, dict):
+            nested = battery_entity.attributes.get("p_batt_forecast")
+            if isinstance(nested, dict):
+                attr_table = nested
+            else:
+                # Fallback: if EMHASS uses a different top-level key for the
+                # timestamp->value table, pick the first nested dict.
+                for maybe_table in battery_entity.attributes.values():
+                    if isinstance(maybe_table, dict):
+                        attr_table = maybe_table
+                        break
+                else:
+                    attr_table = battery_entity.attributes
+
+        for key, value in attr_table.items():
             parsed = dt_util.parse_datetime(str(key))
             numeric = self._coerce_float(value)
             if parsed is None or numeric is None:
                 continue
 
             parsed_utc = dt_util.as_utc(parsed)
-            if parsed_utc <= now_utc:
+            if parsed_utc < now_utc:
                 continue
 
             if nearest_time is None or parsed_utc < nearest_time:
                 nearest_time = parsed_utc
                 nearest_value = numeric
+
+        if nearest_value is None and _LOGGER.isEnabledFor(logging.DEBUG):
+            if isinstance(battery_entity.attributes, dict):
+                attr_keys = list(battery_entity.attributes.keys())
+            else:
+                attr_keys = []
+            _LOGGER.debug(
+                "Could not derive would_apply battery power; state=%s attr_keys=%s",
+                battery_entity.state,
+                attr_keys,
+            )
 
         return {
             "battery_power_w": None
@@ -603,6 +663,9 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         """Run the daily EMHASS optimization at 17:00 schedule."""
         async with self._operation_lock:
             _LOGGER.debug("Daily optimization started")
+            if not self._optimizer_enabled:
+                _LOGGER.debug("Optimization disabled; skipping daily optimization")
+                return
             try:
                 async with asyncio.timeout(90):
                     optimization_inputs, raw_pv = await self._async_collect_inputs()
@@ -638,6 +701,9 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         """Run the hourly EMHASS publish-data step."""
         async with self._operation_lock:
             _LOGGER.debug("Hourly publish started")
+            if not self._optimizer_enabled:
+                _LOGGER.debug("Optimization disabled; skipping hourly publish")
+                return
             try:
                 async with asyncio.timeout(60):
                     optimization_inputs, raw_pv = await self._async_collect_inputs()

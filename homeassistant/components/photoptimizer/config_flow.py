@@ -27,7 +27,6 @@ from .const import (
     CONF_HORIZON_HOURS,
     CONF_KWP,
     CONF_LOAD_FORECAST_ENTITY,
-    CONF_PRICE_INCLUDE_VAT,
     CONF_PV_FORECAST_ENTITY,
     CONF_RESOLUTION,
     CONF_WEAR_COST_PER_KWH,
@@ -35,7 +34,6 @@ from .const import (
     DEFAULT_BATTERY_SOC_RESERVE_PERCENT,
     DEFAULT_EMHASS_URL,
     DEFAULT_HORIZON_HOURS,
-    DEFAULT_PRICE_INCLUDE_VAT,
     DEFAULT_RESOLUTION,
     DEFAULT_WEAR_COST_PER_KWH,
     DOMAIN,
@@ -103,9 +101,6 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         multiple=False,
                     )
                 ),
-                vol.Required(
-                    CONF_PRICE_INCLUDE_VAT, default=DEFAULT_PRICE_INCLUDE_VAT
-                ): bool,
             }
         )
 

@@ -43,7 +43,7 @@ class PhotoptimizerSwitch(CoordinatorEntity[PhotoptimizerCoordinator], SwitchEnt
         """Initialize the switch."""
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_optimizer_enabled"
-        self._attr_is_on = False
+        self._attr_is_on = coordinator.optimizer_enabled
         _LOGGER.debug("Created switch entity unique_id=%s", self._attr_unique_id)
 
     @property
@@ -55,12 +55,16 @@ class PhotoptimizerSwitch(CoordinatorEntity[PhotoptimizerCoordinator], SwitchEnt
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the entity on."""
+        await self.coordinator.async_set_optimizer_enabled(True)
         self._attr_is_on = True
         self.async_write_ha_state()
         _LOGGER.debug("Optimizer switch turned on")
+        # Bootstrap once after enabling.
+        self.hass.async_create_task(self.coordinator.async_run_startup_bootstrap())
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the entity off."""
+        await self.coordinator.async_set_optimizer_enabled(False)
         self._attr_is_on = False
         self.async_write_ha_state()
         _LOGGER.debug("Optimizer switch turned off")

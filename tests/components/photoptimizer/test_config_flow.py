@@ -19,7 +19,6 @@ from homeassistant.components.photoptimizer.const import (
     CONF_HORIZON_HOURS,
     CONF_KWP,
     CONF_LOAD_FORECAST_ENTITY,
-    CONF_PRICE_INCLUDE_VAT,
     CONF_RESOLUTION,
     CONF_WEAR_COST_PER_KWH,
     DEFAULT_HORIZON_HOURS,
@@ -44,7 +43,6 @@ async def test_full_user_flow(hass: HomeAssistant, mock_setup_entry: AsyncMock) 
         result["flow_id"],
         {
             CONF_ELECTRICITY_PRICE_ENTITY: "sensor.electricity_price",
-            CONF_PRICE_INCLUDE_VAT: True,
         },
     )
     assert result["type"] is FlowResultType.FORM
@@ -95,7 +93,6 @@ async def test_full_user_flow(hass: HomeAssistant, mock_setup_entry: AsyncMock) 
     assert result["data"][CONF_HORIZON_HOURS] == DEFAULT_HORIZON_HOURS
     assert result["data"][CONF_RESOLUTION] == DEFAULT_RESOLUTION
     assert result["data"][CONF_ELECTRICITY_PRICE_ENTITY] == "sensor.electricity_price"
-    assert result["data"][CONF_PRICE_INCLUDE_VAT] is True
     assert result["data"][CONF_LATITUDE] == 49.5962536
     assert result["data"][CONF_LONGITUDE] == 18.3395664
     assert result["data"][CONF_AZIMUTH] == 124
@@ -132,7 +129,6 @@ async def test_abort_when_already_configured(
         result["flow_id"],
         {
             CONF_ELECTRICITY_PRICE_ENTITY: "sensor.electricity_price",
-            CONF_PRICE_INCLUDE_VAT: False,
         },
     )
     result = await hass.config_entries.flow.async_configure(
@@ -173,7 +169,6 @@ async def test_abort_when_already_configured(
         result["flow_id"],
         {
             CONF_ELECTRICITY_PRICE_ENTITY: "sensor.electricity_price_2",
-            CONF_PRICE_INCLUDE_VAT: True,
         },
     )
     result = await hass.config_entries.flow.async_configure(

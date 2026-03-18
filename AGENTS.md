@@ -23,3 +23,12 @@ Prefer concrete types (for example, `HomeAssistant`, `MockConfigEntry`, etc.) ov
 ## Good practices
 
 Integrations with Platinum or Gold level in the Integration Quality Scale reflect a high standard of code quality and maintainability. When looking for examples of something, these are good places to start. The level is indicated in the manifest.json of the integration.
+
+
+## Goal
+@homeassistant/components/photoptimizer 
+Vyvíjím integraci v home assistant core. 
+Slouží k chytrému řízení solární elektrárny s využitím EMHASSU: https://emhass.readthedocs.io/en/latest/publish_data.html#computed-variables-and-published-data
+
+Dělám to jako bakalářskou práci. Takže potřebuju aby ten kód měl srozumitelnou strukturu a komentáře.
+Než budeš řešit nějaký problém, zeptej se mě na logy, screenshoty nebo cokoli co může pomoct.
