@@ -354,10 +354,11 @@ class EmhassClient:
     def _build_publish_payload(
         self, optimization_time_step_minutes: int
     ) -> dict[str, Any]:
-        """Build the publish-data payload with custom entity targets.
+        """Build the minimal publish-data payload.
 
-        We explicitly pass entity descriptors so EMHASS writes predictable
-        entities that this integration can read afterwards.
+        EMHASS already publishes to documented default entity IDs, so we only
+        pass parameters needed to select the correct timestamp granularity and
+        deferrable-load shape.
         """
         payload = {
             # Both must match the values used during naive-mpc-optim so that
@@ -365,17 +366,6 @@ class EmhassClient:
             # and does not try to publish deferrable load columns that don't exist.
             "optimization_time_step": optimization_time_step_minutes,
             "number_of_deferrable_loads": 0,
-            "custom_pv_forecast_id": self._published_entities["pv_forecast"],
-            "custom_load_forecast_id": self._published_entities["load_forecast"],
-            "custom_batt_forecast_id": self._published_entities["battery_forecast"],
-            "custom_batt_soc_forecast_id": self._published_entities[
-                "battery_soc_forecast"
-            ],
-            "custom_grid_forecast_id": self._published_entities["grid_forecast"],
-            "custom_unit_load_cost_id": self._published_entities["unit_load_cost"],
-            "custom_unit_prod_price_id": self._published_entities["unit_prod_price"],
-            "custom_cost_fun_id": self._published_entities["cost_fun"],
-            "custom_optim_status_id": self._published_entities["optim_status"],
         }
         _LOGGER.debug(
             "Built publish payload: optimization_time_step=%s keys=%s",
@@ -578,7 +568,7 @@ class EmhassClient:
         Execution sequence:
         1. Reachability check.
         2. POST ``naive-mpc-optim`` with runtimeparams.
-        3. POST ``publish-data`` with entity mapping.
+        3. POST ``publish-data`` with minimal runtime parameters.
         4. Wait for HA state machine to process updates.
         5. Read and return published entity snapshots.
 

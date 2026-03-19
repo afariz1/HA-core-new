@@ -19,6 +19,8 @@ from .const import DOMAIN
 from .coordinator import PhotoptimizerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+# Keep Photoptimizer logs verbose by default for easier troubleshooting.
+_LOGGER.setLevel(logging.DEBUG)
 _PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
 
 
@@ -96,7 +98,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Run daily optimization with error isolation."""
         _LOGGER.debug("Scheduled daily optimization triggered")
         if not coordinator.optimizer_enabled:
-            _LOGGER.debug("Optimization disabled via switch; skipping daily optimization")
+            _LOGGER.debug(
+                "Optimization disabled via switch; skipping daily optimization"
+            )
             return
         try:
             await coordinator.async_run_daily_optimization()
@@ -120,7 +124,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Run startup sequence in strict order: optimize first, publish second."""
         _LOGGER.debug("Startup bootstrap started")
         if not coordinator.optimizer_enabled:
-            _LOGGER.debug("Optimization disabled via switch; skipping startup bootstrap")
+            _LOGGER.debug(
+                "Optimization disabled via switch; skipping startup bootstrap"
+            )
             return
         try:
             await coordinator.async_run_daily_optimization()
