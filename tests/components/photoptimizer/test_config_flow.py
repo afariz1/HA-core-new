@@ -18,7 +18,6 @@ from homeassistant.components.photoptimizer.const import (
     CONF_GRID_POWER_ENTITY,
     CONF_HORIZON_HOURS,
     CONF_KWP,
-    CONF_LOAD_FORECAST_ENTITY,
     CONF_RESOLUTION,
     CONF_WEAR_COST_PER_KWH,
     DEFAULT_HORIZON_HOURS,
@@ -60,15 +59,6 @@ async def test_full_user_flow(hass: HomeAssistant, mock_setup_entry: AsyncMock) 
         },
     )
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "load_forecast"
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        {
-            CONF_LOAD_FORECAST_ENTITY: "sensor.load_forecast",
-        },
-    )
-    assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "inverter"
 
     result = await hass.config_entries.flow.async_configure(
@@ -99,7 +89,6 @@ async def test_full_user_flow(hass: HomeAssistant, mock_setup_entry: AsyncMock) 
     assert result["data"][CONF_DECLINATION] == 40
     assert result["data"][CONF_KWP] == 6.44
     assert result["data"][CONF_API_KEY] == "api-key"
-    assert result["data"][CONF_LOAD_FORECAST_ENTITY] == "sensor.load_forecast"
     assert (
         result["data"][CONF_CURRENT_SOLAR_PRODUCTION_ENTITY]
         == "sensor.solar_production"
@@ -140,10 +129,6 @@ async def test_abort_when_already_configured(
             CONF_DECLINATION: 40,
             CONF_KWP: 5.0,
         },
-    )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        {},
     )
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],

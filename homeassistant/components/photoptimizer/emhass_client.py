@@ -13,6 +13,7 @@ shapes. Keeping that mapping here makes protocol updates easier and localized.
 from __future__ import annotations
 
 import logging
+from numbers import Real
 from typing import Any
 
 from aiohttp import ClientError, ClientTimeout
@@ -27,6 +28,11 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_BATTERY_CHARGE_POWER_MAX = 1000.0
 DEFAULT_BATTERY_DISCHARGE_POWER_MAX = 1000.0
 DEFAULT_BATTERY_MAXIMUM_STATE_OF_CHARGE = 0.9
+DEFAULT_ML_HISTORIC_DAYS = 9
+DEFAULT_ML_MODEL_TYPE = "photoptimizer_load"
+DEFAULT_ML_SKLEARN_MODEL = "RandomForestRegressor"
+DEFAULT_ML_NUM_LAGS = 48
+DEFAULT_ML_SPLIT_DATE_DELTA = "48h"
 
 
 class EmhassClient:
@@ -234,6 +240,63 @@ class EmhassClient:
         except ClientError as err:
             _LOGGER.error("EMHASS connection error at %s: %s", endpoint, err)
             return None
+
+    def _coerce_float(self, value: object) -> float | None:
+        """Convert a value to float when possible."""
+        if isinstance(value, str) or (isinstance(value, Real) and not isinstance(value, bool)):
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        return None
+
+    def _extract_numeric_list(self, value: object) -> list[float]:
+        """Extract numeric values from nested JSON structures."""
+        if isinstance(value, list):
+            result: list[float] = []
+            for item in value:
+                numeric = self._coerce_float(item)
+                if numeric is None:
+                    return []
+                result.append(numeric)
+            return result
+
+        if isinstance(value, dict):
+            for nested in value.values():
+                extracted = self._extract_numeric_list(nested)
+                if extracted:
+                    return extracted
+
+        return []
+
+    def _extract_load_forecast_from_response(
+        self,
+        response: dict[str, Any],
+        expected_points: int,
+    ) -> list[float]:
+        """Extract load forecast values from flexible EMHASS response shapes."""
+        # Common candidates first, then recursive fallback.
+        candidate_keys = (
+            "load_power_forecast",
+            "P_Load",
+            "y_pred",
+            "prediction",
+            "predictions",
+            "data",
+        )
+
+        for key in candidate_keys:
+            if key not in response:
+                continue
+            values = self._extract_numeric_list(response[key])
+            if len(values) >= expected_points:
+                return values[:expected_points]
+
+        values = self._extract_numeric_list(response)
+        if len(values) >= expected_points:
+            return values[:expected_points]
+
+        return []
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("EMHASS unexpected error at %s: %s", endpoint, err)
             return None
@@ -387,6 +450,97 @@ class EmhassClient:
             "runtimeparams": runtimeparams,
             "optimization_response": optimization_response,
         }
+
+    async def async_forecast_model_fit(
+        self,
+        *,
+        var_model: str,
+        historic_days_to_retrieve: int = DEFAULT_ML_HISTORIC_DAYS,
+        model_type: str = DEFAULT_ML_MODEL_TYPE,
+    ) -> dict[str, Any] | None:
+        """Train EMHASS ML forecasting model for load history entity."""
+        _LOGGER.debug(
+            "Starting EMHASS forecast-model-fit var_model=%s historic_days=%s model_type=%s",
+            var_model,
+            historic_days_to_retrieve,
+            model_type,
+        )
+        if not await self._async_check_url(self._url, "EMHASS base"):
+            _LOGGER.debug("EMHASS forecast-model-fit aborted: base URL unreachable")
+            return None
+
+        payload: dict[str, Any] = {
+            "var_model": var_model,
+            "historic_days_to_retrieve": historic_days_to_retrieve,
+            "model_type": model_type,
+            "sklearn_model": DEFAULT_ML_SKLEARN_MODEL,
+            "num_lags": DEFAULT_ML_NUM_LAGS,
+            "split_date_delta": DEFAULT_ML_SPLIT_DATE_DELTA,
+            "perform_backtest": False,
+        }
+        response = await self._async_post_action(
+            "forecast-model-fit",
+            payload,
+            timeout=120,
+        )
+        if response is None:
+            _LOGGER.debug("EMHASS forecast-model-fit failed: no response")
+            return None
+
+        _LOGGER.debug(
+            "EMHASS forecast-model-fit finished: response_keys=%s",
+            sorted(response.keys()),
+        )
+        return response
+
+    async def async_forecast_model_predict(
+        self,
+        *,
+        var_model: str,
+        prediction_horizon: int,
+        optimization_time_step_minutes: int,
+        model_type: str = DEFAULT_ML_MODEL_TYPE,
+    ) -> list[float] | None:
+        """Predict load power forecast with EMHASS ML forecaster."""
+        _LOGGER.debug(
+            "Starting EMHASS forecast-model-predict var_model=%s horizon=%s step=%s model_type=%s",
+            var_model,
+            prediction_horizon,
+            optimization_time_step_minutes,
+            model_type,
+        )
+        if not await self._async_check_url(self._url, "EMHASS base"):
+            _LOGGER.debug("EMHASS forecast-model-predict aborted: base URL unreachable")
+            return None
+
+        payload: dict[str, Any] = {
+            "var_model": var_model,
+            "model_type": model_type,
+            "prediction_horizon": prediction_horizon,
+            "optimization_time_step": optimization_time_step_minutes,
+        }
+        response = await self._async_post_action(
+            "forecast-model-predict",
+            payload,
+            timeout=60,
+        )
+        if response is None:
+            _LOGGER.debug("EMHASS forecast-model-predict failed: no response")
+            return None
+
+        values = self._extract_load_forecast_from_response(response, prediction_horizon)
+        if not values:
+            _LOGGER.debug(
+                "EMHASS forecast-model-predict returned no usable list: response_keys=%s",
+                sorted(response.keys()),
+            )
+            return None
+
+        _LOGGER.debug(
+            "EMHASS forecast-model-predict finished with %s values",
+            len(values),
+        )
+        return values
 
     async def async_publish_data(
         self, optimization_time_step_minutes: int

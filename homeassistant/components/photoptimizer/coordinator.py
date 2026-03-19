@@ -25,10 +25,10 @@ from .const import (
     CONF_BATTERY_SOC_ENTITY,
     CONF_BATTERY_SOC_RESERVE_PERCENT,
     CONF_ELECTRICITY_PRICE_ENTITY,
+    CONF_CURRENT_CONSUMPTION_ENTITY,
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
     CONF_HORIZON_HOURS,
-    CONF_LOAD_FORECAST_ENTITY,
     CONF_PV_FORECAST_ENTITY,
     CONF_TIMEZONE,
     CONF_WEAR_COST_PER_KWH,
@@ -42,6 +42,7 @@ from .emhass_client import EmhassClient
 from .models import OptimizationBucket, OptimizationInputs, PublishedEntityState
 
 _LOGGER = logging.getLogger(__name__)
+_MIN_HISTORY_ROWS_FOR_ML = 72
 
 
 class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
@@ -100,6 +101,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_optimization_response: dict[str, Any] = {}
         self._last_publish_response: dict[str, Any] = {}
         self._last_published_entities: dict[str, PublishedEntityState] = {}
+        self._last_ml_fit_utc: datetime | None = None
         # Controlled by the integration switch; when disabled we skip scheduled runs.
         self._optimizer_enabled: bool = True
         _LOGGER.debug(
@@ -330,12 +332,15 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             raw_pv = await self.client.estimate()
             await self._hourly_from_forecast_solar(timeline, raw_pv)
 
-        load_entity = self.entry.data.get(CONF_LOAD_FORECAST_ENTITY)
+        load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
         if load_entity:
-            _LOGGER.debug("Using load forecast entity: %s", load_entity)
-            await self._hourly_from_load_entity(load_entity, timeline)
+            _LOGGER.debug(
+                "Using load entity for ML forecast: %s",
+                load_entity,
+            )
+            await self._hourly_from_emhass_ml_or_profile(load_entity, timeline)
         else:
-            _LOGGER.debug("No load forecast entity configured, building profile")
+            _LOGGER.debug("No load entity configured, using default profile")
             load_profile = await self._build_load_profile(None)
             await self._hourly_from_load_profile(timeline, load_profile)
 
@@ -350,6 +355,131 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 raw_forecast_solar=raw_pv,
             ),
             raw_pv,
+        )
+
+    async def _async_has_sufficient_history(self, entity_id: str) -> bool:
+        """Check if history has enough rows for EMHASS ML forecasting."""
+        start = dt_util.utcnow() - timedelta(days=9)
+
+        def _get_stats(
+            hass: HomeAssistant,
+        ) -> dict[str, list[StatisticsRow]]:
+            return statistics_during_period(
+                hass,
+                start,
+                None,
+                {entity_id},
+                "hour",
+                None,
+                {"mean", "sum"},
+            )
+
+        try:
+            stats = await self.hass.async_add_executor_job(_get_stats, self.hass)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("History sufficiency check failed for %s: %s", entity_id, err)
+            return False
+
+        rows = stats.get(entity_id) or []
+        valid_rows = 0
+        for row in rows:
+            if row.get("mean") is not None or row.get("sum") is not None:
+                valid_rows += 1
+
+        is_sufficient = valid_rows >= _MIN_HISTORY_ROWS_FOR_ML
+        _LOGGER.debug(
+            "History sufficiency for %s: valid_rows=%s threshold=%s sufficient=%s",
+            entity_id,
+            valid_rows,
+            _MIN_HISTORY_ROWS_FOR_ML,
+            is_sufficient,
+        )
+        return is_sufficient
+
+    async def _async_train_load_forecast_model(
+        self,
+        entity_id: str,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Train EMHASS ML model once per day (or force)."""
+        now = dt_util.utcnow()
+        if (
+            not force
+            and self._last_ml_fit_utc is not None
+            and self._last_ml_fit_utc.date() == now.date()
+        ):
+            _LOGGER.debug(
+                "Skipping ML fit for %s; already trained today at %s",
+                entity_id,
+                self._last_ml_fit_utc.isoformat(),
+            )
+            return True
+
+        fit_response = await self.emhass.async_forecast_model_fit(var_model=entity_id)
+        if fit_response is None:
+            _LOGGER.debug("ML fit failed for %s", entity_id)
+            return False
+
+        self._last_ml_fit_utc = now
+        _LOGGER.debug(
+            "ML fit finished for %s at %s response_keys=%s",
+            entity_id,
+            now.isoformat(),
+            sorted(fit_response.keys()),
+        )
+        return True
+
+    async def _hourly_from_emhass_ml_or_profile(
+        self,
+        entity_id: str,
+        buckets: list[OptimizationBucket],
+    ) -> None:
+        """Populate load using EMHASS ML forecast with profile fallback."""
+        if not await self._async_has_sufficient_history(entity_id):
+            _LOGGER.debug(
+                "Insufficient history for ML forecast (%s), using profile fallback",
+                entity_id,
+            )
+            profile = await self._build_load_profile(entity_id)
+            await self._hourly_from_load_profile(buckets, profile)
+            return
+
+        await self._async_train_load_forecast_model(entity_id)
+        prediction_horizon = len(buckets)
+        if prediction_horizon == 0:
+            return
+
+        step_minutes = 60
+        if len(buckets) >= 2:
+            step_minutes = int(
+                (buckets[1].start - buckets[0].start).total_seconds() // 60
+            )
+
+        ml_forecast_w = await self.emhass.async_forecast_model_predict(
+            var_model=entity_id,
+            prediction_horizon=prediction_horizon,
+            optimization_time_step_minutes=step_minutes,
+        )
+        if ml_forecast_w is None:
+            _LOGGER.debug(
+                "ML predict failed for %s, using profile fallback",
+                entity_id,
+            )
+            profile = await self._build_load_profile(entity_id)
+            await self._hourly_from_load_profile(buckets, profile)
+            return
+
+        bucket_hours = step_minutes / 60.0
+        for index, bucket in enumerate(buckets):
+            if index >= len(ml_forecast_w):
+                break
+            bucket.load = (ml_forecast_w[index] * bucket_hours) / 1000.0
+
+        _LOGGER.debug(
+            "Load timeline populated from EMHASS ML forecast for %s: points=%s",
+            entity_id,
+            len(ml_forecast_w),
         )
 
     async def _hourly_from_price_entity(
@@ -668,6 +798,14 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 return
             try:
                 async with asyncio.timeout(90):
+                    load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
+                    if load_entity and await self._async_has_sufficient_history(
+                        load_entity
+                    ):
+                        await self._async_train_load_forecast_model(
+                            load_entity,
+                            force=True,
+                        )
                     optimization_inputs, raw_pv = await self._async_collect_inputs()
                     optimization_result = (
                         await self.emhass.async_run_naive_optimization(

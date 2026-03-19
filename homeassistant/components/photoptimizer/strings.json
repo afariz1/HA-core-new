@@ -8,7 +8,7 @@
     "step": {
       "electricity_price": {
         "data": {
-          "electricity_price_entity": "Electricity price entity",
+          "electricity_price_entity": "Electricity price entity"
         },
         "description": "Select the electricity price entity.",
         "title": "Configure electricity spot price"
@@ -19,22 +19,15 @@
           "battery_efficiency_round_trip": "Round-trip efficiency (%)",
           "battery_soc_entity": "Battery state of charge",
           "battery_soc_reserve_percent": "Reserve state of charge (%)",
-          "current_consumption_entity": "Current consumption",
+          "current_consumption_entity": "Household load",
           "current_solar_production_entity": "Current solar production",
           "emhass_token": "EMHASS access token (optional)",
           "emhass_url": "EMHASS URL",
           "grid_power_entity": "Grid power",
           "wear_cost_per_kwh": "Battery wear cost (per kWh)"
         },
-        "description": "Select entities to be pulled from inverter.",
+        "description": "Select inverter entities. Household load is used for current load and EMHASS ML load forecast from history.",
         "title": "Configure inverter data"
-      },
-      "load_forecast": {
-        "data": {
-          "load_forecast_entity": "Load forecast entity (optional)"
-        },
-        "description": "Select a load forecast entity or leave empty to use Photoptimizer's automatic profile from history.",
-        "title": "Configure load forecast"
       },
       "pv_forecast": {
         "data": {

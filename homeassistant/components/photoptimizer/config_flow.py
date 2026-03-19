@@ -26,7 +26,6 @@ from .const import (
     CONF_GRID_POWER_ENTITY,
     CONF_HORIZON_HOURS,
     CONF_KWP,
-    CONF_LOAD_FORECAST_ENTITY,
     CONF_PV_FORECAST_ENTITY,
     CONF_RESOLUTION,
     CONF_WEAR_COST_PER_KWH,
@@ -130,7 +129,7 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             _LOGGER.debug("PV forecast step completed with unique_id=%s", unique_id)
 
-            return await self.async_step_load_forecast()
+            return await self.async_step_inverter()
 
         _LOGGER.debug("Showing PV forecast form")
 
@@ -153,41 +152,6 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="pv_forecast",
-            data_schema=data_schema,
-            errors=errors,
-        )
-
-    async def async_step_load_forecast(
-        self, user_input: dict[str, Any] | None = None
-    ) -> config_entries.ConfigFlowResult:
-        """Load forecast step: optional entity, else automatic profile."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            _LOGGER.debug(
-                "Load forecast step received input: %s",
-                _redact_user_input(user_input),
-            )
-            self._data.update(user_input)
-            _LOGGER.debug("Load forecast step completed")
-
-            return await self.async_step_inverter()
-
-        _LOGGER.debug("Showing load forecast form")
-
-        data_schema = vol.Schema(
-            {
-                vol.Optional(CONF_LOAD_FORECAST_ENTITY): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["sensor"],
-                        multiple=False,
-                    )
-                ),
-            }
-        )
-
-        return self.async_show_form(
-            step_id="load_forecast",
             data_schema=data_schema,
             errors=errors,
         )
