@@ -74,7 +74,9 @@ def _emhass_table(index: int, field: str) -> Callable[[dict], StateType]:
     """Read a future value from a published EMHASS entity attribute table."""
 
     def _coerce_float(value: object) -> float | None:
-        if isinstance(value, str) or (isinstance(value, Real) and not isinstance(value, bool)):
+        if isinstance(value, str) or (
+            isinstance(value, Real) and not isinstance(value, bool)
+        ):
             try:
                 return float(value)
             except ValueError:
@@ -346,7 +348,6 @@ SENSOR_TYPES: tuple[PhotoptimizerSensorEntityDescription, ...] = (
     PhotoptimizerSensorEntityDescription(
         key="emhass_optim_status",
         name="Photoptimizer EMHASS optimization status",
-        native_unit_of_measurement="",
         value_fn=_emhass_current_state_str("optim_status"),
     ),
     PhotoptimizerSensorEntityDescription(

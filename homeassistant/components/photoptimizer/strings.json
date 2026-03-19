@@ -8,7 +8,7 @@
     "step": {
       "electricity_price": {
         "data": {
-          "electricity_price_entity": "Electricity price entity",
+          "electricity_price_entity": "Electricity price entity"
         },
         "description": "Select the electricity price entity.",
         "title": "Configure electricity spot price"
