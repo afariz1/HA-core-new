@@ -59,7 +59,6 @@ class PhotoptimizerSwitch(CoordinatorEntity[PhotoptimizerCoordinator], SwitchEnt
         self._attr_is_on = True
         self.async_write_ha_state()
         _LOGGER.debug("Optimizer switch turned on")
-        # Bootstrap once after enabling.
         self.hass.async_create_task(self.coordinator.async_run_startup_bootstrap())
 
     async def async_turn_off(self, **kwargs: Any) -> None:

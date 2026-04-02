@@ -6,16 +6,18 @@ from homeassistant import config_entries
 from homeassistant.components.photoptimizer.const import (
     CONF_AZIMUTH,
     CONF_BATTERY_CAPACITY_KWH,
+    CONF_BATTERY_CHARGE_POWER_MAX,
+    CONF_BATTERY_DISCHARGE_POWER_MAX,
     CONF_BATTERY_EFFICIENCY_ROUND_TRIP,
     CONF_BATTERY_SOC_ENTITY,
     CONF_BATTERY_SOC_RESERVE_PERCENT,
+    CONF_BATTERY_TARGET_SOC_PERCENT,
     CONF_CURRENT_CONSUMPTION_ENTITY,
     CONF_CURRENT_SOLAR_PRODUCTION_ENTITY,
     CONF_DECLINATION,
     CONF_ELECTRICITY_PRICE_ENTITY,
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
-    CONF_GRID_POWER_ENTITY,
     CONF_HORIZON_HOURS,
     CONF_KWP,
     CONF_RESOLUTION,
@@ -24,12 +26,17 @@ from homeassistant.components.photoptimizer.const import (
     DEFAULT_RESOLUTION,
     DOMAIN,
 )
+from homeassistant.components.recorder import Recorder
 from homeassistant.const import CONF_API_KEY, CONF_LATITUDE, CONF_LONGITUDE
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
 
-async def test_full_user_flow(hass: HomeAssistant, mock_setup_entry: AsyncMock) -> None:
+async def test_full_user_flow(
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    mock_setup_entry: AsyncMock,
+) -> None:
     """Test full multi-step user flow creates an entry."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
@@ -66,11 +73,13 @@ async def test_full_user_flow(hass: HomeAssistant, mock_setup_entry: AsyncMock) 
         {
             CONF_CURRENT_SOLAR_PRODUCTION_ENTITY: "sensor.solar_production",
             CONF_CURRENT_CONSUMPTION_ENTITY: "sensor.home_consumption",
-            CONF_GRID_POWER_ENTITY: "sensor.grid_power",
             CONF_BATTERY_SOC_ENTITY: "sensor.battery_soc",
             CONF_BATTERY_CAPACITY_KWH: 10.0,
             CONF_BATTERY_SOC_RESERVE_PERCENT: 20.0,
+            CONF_BATTERY_TARGET_SOC_PERCENT: 60.0,
             CONF_BATTERY_EFFICIENCY_ROUND_TRIP: 95.0,
+            CONF_BATTERY_CHARGE_POWER_MAX: 1500.0,
+            CONF_BATTERY_DISCHARGE_POWER_MAX: 2200.0,
             CONF_WEAR_COST_PER_KWH: 0.01,
             CONF_EMHASS_URL: "http://localhost:5000",
             CONF_EMHASS_TOKEN: "secret-token",
@@ -94,11 +103,13 @@ async def test_full_user_flow(hass: HomeAssistant, mock_setup_entry: AsyncMock) 
         == "sensor.solar_production"
     )
     assert result["data"][CONF_CURRENT_CONSUMPTION_ENTITY] == "sensor.home_consumption"
-    assert result["data"][CONF_GRID_POWER_ENTITY] == "sensor.grid_power"
     assert result["data"][CONF_BATTERY_SOC_ENTITY] == "sensor.battery_soc"
     assert result["data"][CONF_BATTERY_CAPACITY_KWH] == 10.0
     assert result["data"][CONF_BATTERY_SOC_RESERVE_PERCENT] == 20.0
+    assert result["data"][CONF_BATTERY_TARGET_SOC_PERCENT] == 60.0
     assert result["data"][CONF_BATTERY_EFFICIENCY_ROUND_TRIP] == 95.0
+    assert result["data"][CONF_BATTERY_CHARGE_POWER_MAX] == 1500.0
+    assert result["data"][CONF_BATTERY_DISCHARGE_POWER_MAX] == 2200.0
     assert result["data"][CONF_WEAR_COST_PER_KWH] == 0.01
     assert result["data"][CONF_EMHASS_URL] == "http://localhost:5000"
     assert result["data"][CONF_EMHASS_TOKEN] == "secret-token"
@@ -106,11 +117,12 @@ async def test_full_user_flow(hass: HomeAssistant, mock_setup_entry: AsyncMock) 
 
 
 async def test_abort_when_already_configured(
-    hass: HomeAssistant, mock_setup_entry: AsyncMock
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    mock_setup_entry: AsyncMock,
 ) -> None:
     """Test flow aborts when unique ID already exists."""
 
-    # Create first entry with unique ID based on latitude/longitude/kwp.
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
@@ -135,18 +147,19 @@ async def test_abort_when_already_configured(
         {
             CONF_CURRENT_SOLAR_PRODUCTION_ENTITY: "sensor.solar_production",
             CONF_CURRENT_CONSUMPTION_ENTITY: "sensor.home_consumption",
-            CONF_GRID_POWER_ENTITY: "sensor.grid_power",
             CONF_BATTERY_SOC_ENTITY: "sensor.battery_soc",
             CONF_BATTERY_CAPACITY_KWH: 10.0,
             CONF_BATTERY_SOC_RESERVE_PERCENT: 20.0,
+            CONF_BATTERY_TARGET_SOC_PERCENT: 60.0,
             CONF_BATTERY_EFFICIENCY_ROUND_TRIP: 95.0,
+            CONF_BATTERY_CHARGE_POWER_MAX: 1500.0,
+            CONF_BATTERY_DISCHARGE_POWER_MAX: 2200.0,
             CONF_WEAR_COST_PER_KWH: 0.01,
             CONF_EMHASS_URL: "http://localhost:5000",
         },
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
 
-    # Start a second flow with the same unique ID tuple.
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )

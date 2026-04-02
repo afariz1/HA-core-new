@@ -1,14 +1,4 @@
-"""Client for EMHASS communication.
-
-This module owns the full HTTP interaction contract with EMHASS:
-
-- Building runtime parameters from coordinator inputs.
-- Calling optimization and publish endpoints in the correct order.
-- Reading back published entities from Home Assistant state machine.
-
-The coordinator intentionally does not know any endpoint names or payload
-shapes. Keeping that mapping here makes protocol updates easier and localized.
-"""
+"""Client for EMHASS communication."""
 
 from __future__ import annotations
 
@@ -36,11 +26,9 @@ DEFAULT_ML_SPLIT_DATE_DELTA = "48h"
 
 
 class EmhassClient:
-    """Own the complete EMHASS workflow for one Photoptimizer config entry.
+    """The complete EMHASS workflow for one Photoptimizer config entry.
 
-    The coordinator prepares neutral aggregated inputs only. This client is the
-    only place that knows how those inputs map to EMHASS runtimeparams, which
-    actions need to be called, and where the published EMHASS entities live.
+    The coordinator prepares neutral inputs only.
     """
 
     def __init__(
@@ -52,37 +40,46 @@ class EmhassClient:
         battery_capacity_kwh: float,
         battery_efficiency: float,
         battery_soc_reserve: float,
+        battery_target_soc: float,
+        battery_charge_power_max_w: float,
+        battery_discharge_power_max_w: float,
         wear_cost_per_kwh: float,
     ) -> None:
         """Store session, base URL, publish targets, and runtime defaults."""
         self._hass = hass
-        # Strip trailing slash once so all endpoint builders can be simple and
-        # avoid accidental double-slashes.
         self._url = url.rstrip("/")
         self._session = async_get_clientsession(hass)
         self._token = token
 
-        # Keep conservative power limits until integration exposes real inverter
-        # capabilities. Values are in Watts because EMHASS expects W.
-        self._battery_charge_power_max = DEFAULT_BATTERY_CHARGE_POWER_MAX
-        self._battery_discharge_power_max = DEFAULT_BATTERY_DISCHARGE_POWER_MAX
+        self._battery_charge_power_max = (
+            battery_charge_power_max_w
+            if battery_charge_power_max_w > 0
+            else DEFAULT_BATTERY_CHARGE_POWER_MAX
+        )
+        self._battery_discharge_power_max = (
+            battery_discharge_power_max_w
+            if battery_discharge_power_max_w > 0
+            else DEFAULT_BATTERY_DISCHARGE_POWER_MAX
+        )
 
-        # EMHASS expects capacity in Wh. If user input is invalid/non-positive,
-        # use a reasonable fallback capacity to keep optimization operational.
         self._battery_nominal_energy_capacity = (
             battery_capacity_kwh * 1000.0 if battery_capacity_kwh > 0 else 5000.0
         )
 
-        # Clamp efficiency into a safe interval to avoid invalid optimization
-        # coefficients and division edge cases on the EMHASS side.
         self._battery_efficiency = min(
             max(battery_efficiency, 0.01),
             1.0,
         )
-        self._battery_soc_reserve = battery_soc_reserve
+        self._battery_soc_reserve = min(
+            max(battery_soc_reserve, 0.0),
+            DEFAULT_BATTERY_MAXIMUM_STATE_OF_CHARGE,
+        )
+        self._battery_target_soc = min(
+            max(battery_target_soc, self._battery_soc_reserve),
+            DEFAULT_BATTERY_MAXIMUM_STATE_OF_CHARGE,
+        )
         self._wear_cost_per_kwh = wear_cost_per_kwh
 
-        # Use documented EMHASS default entity IDs.
         self._published_entities: dict[str, dict[str, str]] = {
             "pv_forecast": {
                 "entity_id": "sensor.p_pv_forecast",
@@ -131,30 +128,27 @@ class EmhassClient:
             },
         }
         _LOGGER.debug(
-            "EMHASS client initialized: url=%s token=%s battery_capacity_wh=%s efficiency=%s soc_reserve=%s wear_cost=%s",
+            "EMHASS client initialized: url=%s token=%s battery_capacity_wh=%s efficiency=%s soc_reserve=%s soc_target=%s charge_max_w=%s discharge_max_w=%s wear_cost=%s",
             self._url,
             "set" if self._token else "unset",
             self._battery_nominal_energy_capacity,
             self._battery_efficiency,
             self._battery_soc_reserve,
+            self._battery_target_soc,
+            self._battery_charge_power_max,
+            self._battery_discharge_power_max,
             self._wear_cost_per_kwh,
         )
 
     def _headers(self) -> dict[str, str]:
         """Return headers for EMHASS HTTP requests."""
         headers = {"Content-Type": "application/json"}
-        # Token is optional; support both protected and open local EMHASS setups.
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
     async def _async_check_url(self, url: str, label: str) -> bool:
-        """Lightweight reachability check before hitting EMHASS.
-
-        We treat any non-5xx response as reachable:
-        - 2xx/3xx means healthy
-        - 4xx often means auth/config mismatch, but server is up
-        """
+        """Lightweight reachability check before hitting EMHASS."""
         _LOGGER.debug("Checking EMHASS reachability for %s at %s", label, url)
         try:
             async with self._session.get(
@@ -170,7 +164,7 @@ class EmhassClient:
                 _LOGGER.error("%s unreachable (%s)", label, response.status)
         except ClientError as err:
             _LOGGER.error("%s connection error at %s: %s", label, url, err)
-        except Exception as err:  # noqa: BLE001
+        except (OSError, RuntimeError, ValueError) as err:
             _LOGGER.error("%s unexpected error at %s: %s", label, url, err)
         return False
 
@@ -183,8 +177,7 @@ class EmhassClient:
     ) -> dict[str, Any] | None:
         """Post one action to the EMHASS web server.
 
-        Returns parsed JSON/dict-like response on success and ``None`` on hard
-        failures where follow-up processing should stop.
+        Returns parsed JSON/dict-like response on success and ``None`` on hard failures.
         """
         endpoint = f"{self._url}/action/{action}"
         _LOGGER.debug(
@@ -204,10 +197,6 @@ class EmhassClient:
             ) as response:
                 text = await response.text()
 
-                # EMHASS API behavior is endpoint-specific:
-                # - 5xx means server-side exception -> hard failure.
-                # - publish-data can return 400 with warning logs while still
-                #   publishing entities; treat as partial success.
                 if response.status not in (200, 201):
                     if response.status >= 500:
                         _LOGGER.error(
@@ -216,8 +205,6 @@ class EmhassClient:
                         )
                         _LOGGER.error("EMHASS error %s: %s", response.status, text)
                         return None
-                    # 400 from publish-data means "published with warnings" — the
-                    # response body is a JSON array of log lines. Log it and continue.
                     _LOGGER.warning(
                         "EMHASS %s returned %s (treating as partial success): %s",
                         action,
@@ -231,8 +218,6 @@ class EmhassClient:
                     if isinstance(data, dict):
                         _LOGGER.debug("EMHASS %s response keys: %s", action, list(data))
                         return data
-                    # Normalize non-dict JSON so callers can handle a consistent
-                    # mapping return type.
                     return {"data": data, "status": response.status}
 
                 _LOGGER.debug("EMHASS %s success %s: %s", action, response.status, text)
@@ -240,10 +225,15 @@ class EmhassClient:
         except ClientError as err:
             _LOGGER.error("EMHASS connection error at %s: %s", endpoint, err)
             return None
+        except (OSError, RuntimeError, ValueError) as err:
+            _LOGGER.error("EMHASS unexpected error at %s: %s", endpoint, err)
+            return None
 
     def _coerce_float(self, value: object) -> float | None:
         """Convert a value to float when possible."""
-        if isinstance(value, str) or (isinstance(value, Real) and not isinstance(value, bool)):
+        if isinstance(value, str) or (
+            isinstance(value, Real) and not isinstance(value, bool)
+        ):
             try:
                 return float(value)
             except ValueError:
@@ -275,7 +265,6 @@ class EmhassClient:
         expected_points: int,
     ) -> list[float]:
         """Extract load forecast values from flexible EMHASS response shapes."""
-        # Common candidates first, then recursive fallback.
         candidate_keys = (
             "load_power_forecast",
             "P_Load",
@@ -297,26 +286,19 @@ class EmhassClient:
             return values[:expected_points]
 
         return []
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("EMHASS unexpected error at %s: %s", endpoint, err)
-            return None
 
     def _build_runtimeparams(self, inputs: OptimizationInputs) -> dict[str, Any]:
-        """Translate aggregated coordinator data into EMHASS runtimeparams.
+        """Translate aggregated coordinator data into EMHASS runtimeparams."""
+        soc_init = min(
+            max(inputs.battery_soc, self._battery_soc_reserve),
+            DEFAULT_BATTERY_MAXIMUM_STATE_OF_CHARGE,
+        )
 
-        Coordinator buckets are stored in kWh for one-hour intervals; EMHASS
-        expects power-oriented forecasts in W for each step. Therefore we scale
-        PV/load forecasts by ``*1000``.
-        """
         runtimeparams: dict[str, Any] = {
             "pv_power_forecast": [bucket.pv * 1000.0 for bucket in inputs.timeline],
             "load_power_forecast": [bucket.load * 1000.0 for bucket in inputs.timeline],
             "load_cost_forecast": [bucket.price for bucket in inputs.timeline],
-            # Future enhancement: replace the fixed 90% export tariff heuristic
-            # with a dedicated export price source exposed by the integration.
             "prod_price_forecast": [bucket.price * 0.9 for bucket in inputs.timeline],
-            # Explicitly enable battery mode and provide plant parameters so the
-            # optimization does not depend on static EMHASS config defaults.
             "set_use_pv": True,
             "set_use_battery": True,
             "battery_discharge_power_max": self._battery_discharge_power_max,
@@ -326,23 +308,19 @@ class EmhassClient:
             "battery_nominal_energy_capacity": self._battery_nominal_energy_capacity,
             "prediction_horizon": inputs.prediction_horizon,
             "optimization_time_step": inputs.optimization_time_step_minutes,
-            "soc_init": inputs.battery_soc,
-            # Keep final SOC aligned with initial SOC for this basic policy.
-            "soc_final": inputs.battery_soc,
-            "battery_target_state_of_charge": inputs.battery_soc,
+            "soc_init": soc_init,
+            "soc_final": self._battery_target_soc,
+            "battery_target_state_of_charge": self._battery_target_soc,
             "battery_minimum_state_of_charge": self._battery_soc_reserve,
             "battery_maximum_state_of_charge": DEFAULT_BATTERY_MAXIMUM_STATE_OF_CHARGE,
             "number_of_deferrable_loads": 0,
             "continual_publish": False,
         }
 
-        # Optional battery degradation penalty; if zero, EMHASS defaults apply.
         if self._wear_cost_per_kwh > 0:
             runtimeparams["weight_battery_charge"] = self._wear_cost_per_kwh
             runtimeparams["weight_battery_discharge"] = self._wear_cost_per_kwh
 
-        # Future enhancement: map real inverter and battery power limits once the
-        # integration exposes charge/discharge capability data.
         _LOGGER.debug(
             "Built runtimeparams: horizon=%s step=%s keys=%s",
             inputs.prediction_horizon,
@@ -354,18 +332,11 @@ class EmhassClient:
     def _build_publish_payload(
         self, optimization_time_step_minutes: int
     ) -> dict[str, Any]:
-        """Build the minimal publish-data payload.
-
-        EMHASS already publishes to documented default entity IDs, so we only
-        pass parameters needed to select the correct timestamp granularity and
-        deferrable-load shape.
-        """
+        """Build the minimal publish-data payload."""
         payload = {
-            # Both must match the values used during naive-mpc-optim so that
-            # publish-data reads opt_res_latest.csv with the correct frequency
-            # and does not try to publish deferrable load columns that don't exist.
             "optimization_time_step": optimization_time_step_minutes,
             "number_of_deferrable_loads": 0,
+            "set_use_battery": True,
         }
         _LOGGER.debug(
             "Built publish payload: optimization_time_step=%s keys=%s",
@@ -375,15 +346,9 @@ class EmhassClient:
         return payload
 
     def _read_published_entities(self) -> dict[str, PublishedEntityState]:
-        """Read EMHASS-published entities from the local HA state machine.
-
-        This snapshot lets the coordinator expose a structured execution result
-        without adding direct dependencies on entity objects.
-        """
+        """Read EMHASS-published entities from the local HA state machine."""
         snapshots: dict[str, PublishedEntityState] = {}
 
-        # Future enhancement: if EMHASS publishes into a different Home Assistant
-        # instance, replace this local state lookup with a remote bridge.
         for key, descriptor in self._published_entities.items():
             entity_id = descriptor["entity_id"]
             state = self._hass.states.get(entity_id)
@@ -407,7 +372,7 @@ class EmhassClient:
         _LOGGER.debug(
             "EMHASS published entities:\n%s",
             "\n".join(
-                f"  {key}: {entity.state} ({entity.entity_id})"
+                f"  {key}: {entity.state} ({entity.entity_id})\n    attributes: {entity.attributes}\n"
                 for key, entity in published_entities.items()
             ),
         )
@@ -415,11 +380,7 @@ class EmhassClient:
     async def async_run_naive_optimization(
         self, inputs: OptimizationInputs
     ) -> dict[str, Any] | None:
-        """Run only the EMHASS naive optimization step.
-
-        This endpoint updates EMHASS optimization artifacts (for example
-        opt_res_latest.csv) but does not publish entities to Home Assistant.
-        """
+        """Run only the EMHASS naive optimization step."""
         _LOGGER.debug("Starting EMHASS naive optimization")
         if not await self._async_check_url(self._url, "EMHASS base"):
             _LOGGER.debug("EMHASS naive optimization aborted: base URL unreachable")

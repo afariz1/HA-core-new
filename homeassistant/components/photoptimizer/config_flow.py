@@ -14,23 +14,27 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_AZIMUTH,
     CONF_BATTERY_CAPACITY_KWH,
+    CONF_BATTERY_CHARGE_POWER_MAX,
+    CONF_BATTERY_DISCHARGE_POWER_MAX,
     CONF_BATTERY_EFFICIENCY_ROUND_TRIP,
     CONF_BATTERY_SOC_ENTITY,
     CONF_BATTERY_SOC_RESERVE_PERCENT,
+    CONF_BATTERY_TARGET_SOC_PERCENT,
     CONF_CURRENT_CONSUMPTION_ENTITY,
     CONF_CURRENT_SOLAR_PRODUCTION_ENTITY,
     CONF_DECLINATION,
     CONF_ELECTRICITY_PRICE_ENTITY,
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
-    CONF_GRID_POWER_ENTITY,
     CONF_HORIZON_HOURS,
     CONF_KWP,
-    CONF_PV_FORECAST_ENTITY,
     CONF_RESOLUTION,
     CONF_WEAR_COST_PER_KWH,
+    DEFAULT_BATTERY_CHARGE_POWER_MAX,
+    DEFAULT_BATTERY_DISCHARGE_POWER_MAX,
     DEFAULT_BATTERY_EFFICIENCY_ROUND_TRIP,
     DEFAULT_BATTERY_SOC_RESERVE_PERCENT,
+    DEFAULT_BATTERY_TARGET_SOC_PERCENT,
     DEFAULT_EMHASS_URL,
     DEFAULT_HORIZON_HOURS,
     DEFAULT_RESOLUTION,
@@ -63,7 +67,7 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Initial step: use baked-in defaults and continue."""
+        """Initial step, use defaults and continue."""
         _LOGGER.debug("Config flow user step started")
         self._data[CONF_HORIZON_HOURS] = DEFAULT_HORIZON_HOURS
         self._data[CONF_RESOLUTION] = DEFAULT_RESOLUTION
@@ -112,7 +116,7 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_pv_forecast(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """PV forecast step: either use entity or built-in Forecast.Solar."""
+        """PV forecast step using Forecast.Solar settings."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -123,7 +127,6 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._data.update(user_input)
             _LOGGER.debug("PV forecast step validating unique ID")
 
-            # Set unique ID based on location and solar configuration
             unique_id = f"{user_input[CONF_LATITUDE]}_{user_input[CONF_LONGITUDE]}_{user_input[CONF_KWP]}"
             await self.async_set_unique_id(unique_id)
             self._abort_if_unique_id_configured()
@@ -141,12 +144,6 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_KWP, default=6.44): vol.Coerce(float),
                 vol.Required(CONF_DECLINATION, default=40): vol.Coerce(int),
                 vol.Optional(CONF_API_KEY): str,
-                vol.Optional(CONF_PV_FORECAST_ENTITY): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["sensor"],
-                        multiple=False,
-                    )
-                ),
             }
         )
 
@@ -195,12 +192,6 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         multiple=False,
                     )
                 ),
-                vol.Required(CONF_GRID_POWER_ENTITY): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["sensor"],
-                        multiple=False,
-                    )
-                ),
                 vol.Required(CONF_BATTERY_SOC_ENTITY): selector.EntitySelector(
                     selector.EntitySelectorConfig(
                         domain=["sensor"],
@@ -216,6 +207,18 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_BATTERY_EFFICIENCY_ROUND_TRIP,
                     default=DEFAULT_BATTERY_EFFICIENCY_ROUND_TRIP,
                 ): vol.All(vol.Coerce(float), vol.Range(min=1, max=100)),
+                vol.Required(
+                    CONF_BATTERY_TARGET_SOC_PERCENT,
+                    default=DEFAULT_BATTERY_TARGET_SOC_PERCENT,
+                ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+                vol.Required(
+                    CONF_BATTERY_CHARGE_POWER_MAX,
+                    default=DEFAULT_BATTERY_CHARGE_POWER_MAX,
+                ): vol.All(vol.Coerce(float), vol.Range(min=1)),
+                vol.Required(
+                    CONF_BATTERY_DISCHARGE_POWER_MAX,
+                    default=DEFAULT_BATTERY_DISCHARGE_POWER_MAX,
+                ): vol.All(vol.Coerce(float), vol.Range(min=1)),
                 vol.Required(
                     CONF_WEAR_COST_PER_KWH, default=DEFAULT_WEAR_COST_PER_KWH
                 ): vol.Coerce(float),

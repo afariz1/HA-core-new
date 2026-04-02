@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import timedelta
 import logging
 
 from forecast_solar import ForecastSolar, ForecastSolarError
@@ -12,33 +12,39 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .const import DOMAIN
 from .coordinator import PhotoptimizerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-# Keep Photoptimizer logs verbose by default for easier troubleshooting.
 _LOGGER.setLevel(logging.DEBUG)
+
 _PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
+_MPC_INTERVAL = timedelta(minutes=5)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Photoptimizer from a config entry.
+    """Set up Photoptimizer."""
+    if entry.entry_id in hass.data.get(DOMAIN, {}):
+        _LOGGER.debug(
+            "Entry already initialized, skipping duplicate setup for entry_id=%s",
+            entry.entry_id,
+        )
+        return True
 
-    Create Forecast.Solar client, coordinator and store it so platforms can use it.
-    """
     _LOGGER.debug(
         "Starting setup for entry_id=%s title=%s", entry.entry_id, entry.title
     )
+
     session = async_get_clientsession(hass)
 
     latitude = entry.data.get("latitude") or hass.config.latitude
     longitude = entry.data.get("longitude") or hass.config.longitude
-    declination = entry.data.get("tilt") or entry.data.get("declination") or 0.0
-    azimuth = entry.data.get("azimuth") or 0.0
-    kwp = entry.data.get("kwp") or 0.0
+    declination = entry.data.get("tilt") or entry.data.get("declination") or 40.0
+    azimuth = entry.data.get("azimuth") or 90.0
+    kwp = entry.data.get("kwp") or 5.0
     api_key = entry.data.get("api_key")
 
     _LOGGER.debug(
@@ -94,87 +100,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, _PLATFORMS)
     _LOGGER.debug("Platform setup forwarding completed")
 
-    async def _async_handle_daily_optimization() -> None:
-        """Run daily optimization with error isolation."""
-        _LOGGER.debug("Scheduled daily optimization triggered")
+    async def _async_handle_mpc_cycle() -> None:
+        """Run one full MPC cycle in strict order: optimize, then publish."""
+        _LOGGER.debug("Scheduled MPC cycle triggered")
         if not coordinator.optimizer_enabled:
-            _LOGGER.debug(
-                "Optimization disabled via switch; skipping daily optimization"
-            )
-            return
-        try:
-            await coordinator.async_run_daily_optimization()
-            _LOGGER.debug("Scheduled daily optimization finished successfully")
-        except UpdateFailed as err:
-            _LOGGER.warning("Daily EMHASS optimization failed: %s", err)
-
-    async def _async_handle_hourly_publish() -> None:
-        """Run hourly publish-data with error isolation."""
-        _LOGGER.debug("Scheduled hourly publish triggered")
-        if not coordinator.optimizer_enabled:
-            _LOGGER.debug("Optimization disabled via switch; skipping hourly publish")
-            return
-        try:
-            await coordinator.async_run_hourly_publish()
-            _LOGGER.debug("Scheduled hourly publish finished successfully")
-        except UpdateFailed as err:
-            _LOGGER.warning("Hourly EMHASS publish-data failed: %s", err)
-
-    async def _async_handle_startup_bootstrap() -> None:
-        """Run startup sequence in strict order: optimize first, publish second."""
-        _LOGGER.debug("Startup bootstrap started")
-        if not coordinator.optimizer_enabled:
-            _LOGGER.debug(
-                "Optimization disabled via switch; skipping startup bootstrap"
-            )
-            return
-        try:
-            await coordinator.async_run_daily_optimization()
-            _LOGGER.debug("Startup bootstrap optimization finished")
-        except UpdateFailed as err:
-            _LOGGER.warning("Startup EMHASS optimization failed: %s", err)
+            _LOGGER.debug("Optimization disabled via switch; skipping MPC cycle")
             return
 
+        _LOGGER.debug("Scheduled MPC optimization triggered")
         try:
-            await coordinator.async_run_hourly_publish()
-            _LOGGER.debug("Startup bootstrap publish finished")
+            await coordinator.async_run_mpc_optimization()
+            _LOGGER.debug("Scheduled MPC optimization finished successfully")
         except UpdateFailed as err:
-            _LOGGER.warning("Startup EMHASS publish-data failed: %s", err)
+            _LOGGER.warning("EMHASS MPC optimization failed: %s", err)
+
+        _LOGGER.debug("Scheduled MPC publish triggered")
+        try:
+            await coordinator.async_run_mpc_publish()
+            _LOGGER.debug("Scheduled MPC publish finished successfully")
+        except UpdateFailed as err:
+            _LOGGER.warning("EMHASS MPC publish-data failed: %s", err)
+
+    async def _async_handle_startup() -> None:
+        """Run startup sequence: optimize, publish."""
+        _LOGGER.debug("Startup started")
+        await _async_handle_mpc_cycle()
+        _LOGGER.debug("Startup bootstrap cycle finished")
 
     @callback
-    def _daily_schedule_listener(_: datetime) -> None:
-        """Schedule daily optimization task at 17:00."""
-        _LOGGER.debug("Daily schedule fired")
-        hass.async_create_task(_async_handle_daily_optimization())
-
-    @callback
-    def _hourly_schedule_listener(_: datetime) -> None:
-        """Schedule hourly publish task on each full hour."""
-        _LOGGER.debug("Hourly schedule fired")
-        hass.async_create_task(_async_handle_hourly_publish())
+    def _mpc_schedule_listener(_: object) -> None:
+        """Schedule one MPC cycle every configured interval."""
+        _LOGGER.debug("MPC schedule fired")
+        hass.async_create_task(_async_handle_mpc_cycle())
 
     entry.async_on_unload(
-        async_track_time_change(
+        async_track_time_interval(
             hass,
-            _daily_schedule_listener,
-            hour=17,
-            minute=0,
-            second=0,
-        )
-    )
-    entry.async_on_unload(
-        async_track_time_change(
-            hass,
-            _hourly_schedule_listener,
-            minute=0,
-            second=0,
+            _mpc_schedule_listener,
+            _MPC_INTERVAL,
         )
     )
 
-    # Prime data right after setup: first generate a fresh optimization result,
-    # then publish entities from that result.
     _LOGGER.debug("Scheduling startup bootstrap task")
-    hass.async_create_task(_async_handle_startup_bootstrap())
+    hass.async_create_task(_async_handle_startup())
 
     _LOGGER.debug("Setup finished for entry_id=%s", entry.entry_id)
     return True
