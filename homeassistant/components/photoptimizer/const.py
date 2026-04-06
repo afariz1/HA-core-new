@@ -27,6 +27,21 @@ CONF_BATTERY_CHARGE_POWER_MAX = "battery_charge_power_max"
 CONF_BATTERY_DISCHARGE_POWER_MAX = "battery_discharge_power_max"
 
 CONF_MAX_INVERTER_CURRENT_AMP = "max_inverter_current_amp"
+CONF_INVERTER_TYPE = "inverter_type"
+CONF_INVERTER_MODE_ENTITY = "inverter_mode_entity"
+CONF_INVERTER_CHARGE_POWER_ENTITY = "inverter_charge_power_entity"
+CONF_INVERTER_DISCHARGE_POWER_ENTITY = "inverter_discharge_power_entity"
+CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY = "growatt_ac_charge_switch_entity"
+CONF_GROWATT_DEVICE_ID = "growatt_device_id"
+CONF_GROWATT_INVERTER_VARIANT = "growatt_inverter_variant"
+
+INVERTER_TYPE_GOODWE = "goodwe"
+INVERTER_TYPE_GROWATT = "growatt"
+
+GROWATT_VARIANT_AUTO = "auto"
+GROWATT_VARIANT_MIN = "min"
+GROWATT_VARIANT_SPH = "sph"
+
 CONF_CURRENT_SOLAR_PRODUCTION_ENTITY = "current_solar_production_entity"
 CONF_CURRENT_CONSUMPTION_ENTITY = "current_consumption_entity"
 

@@ -14,6 +14,7 @@ from forecast_solar import ForecastSolar, ForecastSolarError
 from homeassistant.components.recorder import get_instance, history
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -43,8 +44,14 @@ from .const import (
     DEFAULT_WEAR_COST_PER_KWH,
 )
 from .emhass_client import EmhassClient
+from .executor import PhotoptimizerExecutor
 from .mlforecast import MLForecastService
-from .models import OptimizationBucket, OptimizationInputs, PublishedEntityState
+from .models import (
+    ExecutionPlan,
+    OptimizationBucket,
+    OptimizationInputs,
+    PublishedEntityState,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _PV_BIAS_MIN_FACTOR = 0.6
@@ -123,6 +130,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             ),
         )
         self.ml_forecast = MLForecastService(hass, self)
+        self.executor = PhotoptimizerExecutor(hass, entry)
         self._operation_lock = asyncio.Lock()
         self._last_optimization_utc: datetime | None = None
         self._last_publish_utc: datetime | None = None
@@ -130,6 +138,9 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_optimization_response: dict[str, Any] = {}
         self._last_publish_response: dict[str, Any] = {}
         self._last_published_entities: dict[str, PublishedEntityState] = {}
+        self._last_execution_plan: ExecutionPlan | None = None
+        self._last_execution_utc: datetime | None = None
+        self._last_execution_applied: bool | None = None
         self._optimizer_enabled: bool = True
         _LOGGER.debug(
             "Coordinator initialized for entry_id=%s emhass_url=%s token=%s",
@@ -307,85 +318,22 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         return None
 
     def _extract_would_apply(
-        self, published_entities: dict[str, PublishedEntityState]
+        self, execution_plan: ExecutionPlan | None
     ) -> dict[str, Any]:
-        """Extract a simple battery command preview from EMHASS published data."""
-        battery_entity = published_entities.get("battery_forecast")
-        if battery_entity is None:
-            if _LOGGER.isEnabledFor(logging.DEBUG):
-                _LOGGER.debug(
-                    "Skipping battery schedule parsing: battery_forecast is missing"
-                )
+        """Extract command preview from normalized execution plan."""
+        if execution_plan is None or not execution_plan.slots:
             return {
                 "battery_power_w": None,
                 "effective_at": None,
-                "source": "missing_battery_forecast",
+                "source": "missing_execution_plan",
             }
 
-        current_value = self._coerce_float(battery_entity.state)
-        if current_value is not None:
-            if _LOGGER.isEnabledFor(logging.DEBUG):
-                _LOGGER.debug(
-                    "Would-apply battery power taken from state value: %s",
-                    round(current_value, 2),
-                )
-            return {
-                "battery_power_w": round(current_value, 2),
-                "effective_at": dt_util.utcnow().isoformat(),
-                "source": "state",
-            }
-
-        nearest_time: datetime | None = None
-        nearest_value: float | None = None
-
-        attr_table: object = {}
-        if isinstance(battery_entity.attributes, dict):
-            nested = battery_entity.attributes.get("p_batt_forecast")
-            if isinstance(nested, dict | list):
-                attr_table = nested
-            else:
-                named_table = battery_entity.attributes.get("battery_scheduled_power")
-                if isinstance(named_table, dict | list):
-                    attr_table = named_table
-                else:
-                    for maybe_table in battery_entity.attributes.values():
-                        if isinstance(maybe_table, dict | list):
-                            attr_table = maybe_table
-                            break
-                    else:
-                        attr_table = battery_entity.attributes
-
-        schedule = self._extract_emhass_battery_schedule(attr_table)
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            preview = [
-                (slot_time.isoformat(), value) for slot_time, value in schedule[:3]
-            ]
-            _LOGGER.debug(
-                "Parsed EMHASS battery schedule: count=%s preview=%s",
-                len(schedule),
-                preview,
-            )
-
-        if schedule:
-            nearest_time, nearest_value = schedule[0]
-
-        if nearest_value is None and _LOGGER.isEnabledFor(logging.DEBUG):
-            if isinstance(battery_entity.attributes, dict):
-                attr_keys = list(battery_entity.attributes.keys())
-            else:
-                attr_keys = []
-            _LOGGER.debug(
-                "Could not derive would_apply battery power; state=%s attr_keys=%s",
-                battery_entity.state,
-                attr_keys,
-            )
-
+        current_slot = execution_plan.slots[0]
         return {
-            "battery_power_w": None
-            if nearest_value is None
-            else round(nearest_value, 2),
-            "effective_at": None if nearest_time is None else nearest_time.isoformat(),
-            "source": "forecast_attribute",
+            "battery_power_w": current_slot.p_bat_cmd,
+            "effective_at": current_slot.slot_start.isoformat(),
+            "source": execution_plan.source,
+            "valid": execution_plan.valid,
         }
 
     def _build_result(
@@ -412,8 +360,13 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 "optimization_response": self._last_optimization_response,
                 "publish_response": self._last_publish_response,
                 "published_entities": published_entities,
+                "execution_plan": (
+                    None
+                    if self._last_execution_plan is None
+                    else self._last_execution_plan.as_dict()
+                ),
             },
-            "would_apply": self._extract_would_apply(self._last_published_entities),
+            "would_apply": self._extract_would_apply(self._last_execution_plan),
             "schedule": {
                 "last_optimization_utc": (
                     None
@@ -425,6 +378,12 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                     if self._last_publish_utc is None
                     else self._last_publish_utc.isoformat()
                 ),
+                "last_execution_utc": (
+                    None
+                    if self._last_execution_utc is None
+                    else self._last_execution_utc.isoformat()
+                ),
+                "last_execution_applied": self._last_execution_applied,
             },
         }
 
@@ -990,7 +949,23 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
                     self._last_publish_response = publish_result["publish_response"]
                     self._last_published_entities = publish_result["published_entities"]
+                    self._last_execution_plan = publish_result["execution_plan"]
                     self._last_publish_utc = dt_util.utcnow()
+
+                    try:
+                        self._last_execution_applied = (
+                            await self.executor.async_execute_plan(
+                                self._last_execution_plan
+                            )
+                        )
+                        self._last_execution_utc = dt_util.utcnow()
+                    except (
+                        HomeAssistantError,
+                        RuntimeError,
+                        ValueError,
+                    ) as err:
+                        self._last_execution_applied = False
+                        _LOGGER.warning("Executor apply failed: %s", err)
 
                     if _LOGGER.isEnabledFor(logging.DEBUG):
                         self._log_timeline(optimization_inputs.timeline)

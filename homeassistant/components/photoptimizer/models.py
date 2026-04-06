@@ -71,6 +71,7 @@ class EmhassExecutionResult:
     optimization_response: dict[str, Any]
     publish_response: dict[str, Any]
     published_entities: dict[str, PublishedEntityState]
+    execution_plan: ExecutionPlan | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly representation for coordinator data."""
@@ -81,6 +82,9 @@ class EmhassExecutionResult:
             "published_entities": {
                 key: entity.as_dict() for key, entity in self.published_entities.items()
             },
+            "execution_plan": (
+                None if self.execution_plan is None else self.execution_plan.as_dict()
+            ),
         }
 
 

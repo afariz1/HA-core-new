@@ -1,5 +1,8 @@
 {
   "config": {
+    "abort": {
+      "already_configured": "This Photoptimizer location is already configured."
+    },
     "error": {
       "cannot_connect": "Failed to connect to Forecast.Solar",
       "cannot_connect_emhass": "Failed to connect to EMHASS",
@@ -29,6 +32,12 @@
           "current_solar_production_entity": "Current solar production",
           "emhass_token": "EMHASS access token (optional)",
           "emhass_url": "EMHASS URL",
+          "growatt_ac_charge_switch_entity": "Growatt AC charge switch (optional)",
+          "growatt_device_id": "Growatt device (optional)",
+          "growatt_inverter_variant": "Growatt inverter variant",
+          "inverter_charge_power_entity": "Inverter charge power entity (optional)",
+          "inverter_discharge_power_entity": "Inverter discharge power entity",
+          "inverter_mode_entity": "Inverter operation mode entity",
           "wear_cost_per_kwh": "Battery wear cost (per kWh)"
         },
         "data_description": {
@@ -43,10 +52,26 @@
           "current_solar_production_entity": "Entity with current PV production power used for near-term forecast correction.",
           "emhass_token": "Optional Bearer token for EMHASS API.",
           "emhass_url": "Base URL of your EMHASS instance.",
+          "growatt_ac_charge_switch_entity": "Optional switch entity for enabling AC charging on Growatt inverters.",
+          "growatt_device_id": "Optional Growatt device for direct growatt_server service calls.",
+          "growatt_inverter_variant": "Select MIN/SPH if known; otherwise keep Auto.",
+          "inverter_charge_power_entity": "Optional number entity used for inverter charging power percentage.",
+          "inverter_discharge_power_entity": "Number entity used for inverter discharging power percentage.",
+          "inverter_mode_entity": "Select entity used to set inverter operating mode (for example general, eco_charge, eco_discharge).",
           "wear_cost_per_kwh": "Optional battery degradation penalty per cycled kWh."
         },
         "description": "Select inverter entities. Household load is used for current load and EMHASS ML load forecast from history.",
         "title": "Configure inverter data"
+      },
+      "inverter_type": {
+        "data": {
+          "inverter_type": "Inverter type"
+        },
+        "data_description": {
+          "inverter_type": "Choose which inverter brand should be controlled by Photoptimizer."
+        },
+        "description": "Select your inverter type.",
+        "title": "Choose inverter type"
       },
       "pv_forecast": {
         "data": {

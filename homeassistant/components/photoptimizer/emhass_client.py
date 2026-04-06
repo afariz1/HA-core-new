@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 from numbers import Real
 from typing import Any
@@ -10,8 +11,16 @@ from aiohttp import ClientError, ClientTimeout
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.util import dt as dt_util
 
-from .models import EmhassExecutionResult, OptimizationInputs, PublishedEntityState
+from .models import (
+    EmhassExecutionResult,
+    ExecutionPlan,
+    ExecutionSlotCommand,
+    OperationMode,
+    OptimizationInputs,
+    PublishedEntityState,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +32,7 @@ DEFAULT_ML_MODEL_TYPE = "photoptimizer_load"
 DEFAULT_ML_SKLEARN_MODEL = "RandomForestRegressor"
 DEFAULT_ML_NUM_LAGS = 48
 DEFAULT_ML_SPLIT_DATE_DELTA = "48h"
+_SLOT_POWER_THRESHOLD_W = 50.0
 
 
 class EmhassClient:
@@ -377,6 +387,199 @@ class EmhassClient:
             ),
         )
 
+    def _extract_schedule(
+        self,
+        table: object,
+        *,
+        value_key: str,
+    ) -> list[tuple[datetime, float]]:
+        """Extract sorted schedule from flexible EMHASS dict/list shapes."""
+        schedule: list[tuple[datetime, float]] = []
+        now_utc = dt_util.utcnow().replace(second=0, microsecond=0)
+
+        if isinstance(table, dict):
+            for key, value in table.items():
+                parsed = dt_util.parse_datetime(str(key))
+                numeric = self._coerce_float(value)
+                if parsed is None or numeric is None:
+                    continue
+
+                parsed_utc = dt_util.as_utc(parsed)
+                if parsed_utc < now_utc:
+                    continue
+
+                schedule.append((parsed_utc, numeric))
+
+        elif isinstance(table, list):
+            for row in table:
+                if not isinstance(row, dict):
+                    continue
+
+                parsed = dt_util.parse_datetime(str(row.get("date")))
+                numeric = self._coerce_float(row.get(value_key))
+                if numeric is None:
+                    for row_key, row_value in row.items():
+                        if row_key == "date":
+                            continue
+                        numeric = self._coerce_float(row_value)
+                        if numeric is not None:
+                            break
+
+                if parsed is None or numeric is None:
+                    continue
+
+                parsed_utc = dt_util.as_utc(parsed)
+                if parsed_utc < now_utc:
+                    continue
+
+                schedule.append((parsed_utc, numeric))
+
+        schedule.sort(key=lambda item: item[0])
+        return schedule
+
+    def _build_execution_plan(
+        self,
+        published_entities: dict[str, PublishedEntityState],
+        *,
+        optimization_time_step_minutes: int,
+    ) -> ExecutionPlan:
+        """Build normalized execution plan from EMHASS published entities."""
+        now_utc = dt_util.utcnow()
+        optim_status = (
+            (
+                (
+                    published_entities.get("optim_status")
+                    or PublishedEntityState("", None, {})
+                ).state
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+
+        if optim_status != "optimal":
+            return ExecutionPlan(
+                slots=[
+                    ExecutionSlotCommand(
+                        slot_start=now_utc,
+                        p_bat_cmd=0,
+                        soc_target=0,
+                        grid_limit=0,
+                        op_mode=OperationMode.AUTO,
+                    )
+                ],
+                step_minutes=optimization_time_step_minutes,
+                timestamp=now_utc,
+                valid=False,
+                source="emhass_publish_status",
+            )
+
+        battery_entity = published_entities.get("battery_forecast")
+        if battery_entity is None:
+            return ExecutionPlan(
+                slots=[],
+                step_minutes=optimization_time_step_minutes,
+                timestamp=now_utc,
+                valid=False,
+                source="emhass_publish_missing_battery",
+            )
+
+        battery_attrs = (
+            battery_entity.attributes
+            if isinstance(battery_entity.attributes, dict)
+            else {}
+        )
+        battery_table = battery_attrs.get("p_batt_forecast")
+        if not isinstance(battery_table, dict | list):
+            battery_table = battery_attrs.get("battery_scheduled_power")
+        if not isinstance(battery_table, dict | list):
+            battery_table = battery_attrs
+
+        power_schedule = self._extract_schedule(
+            battery_table,
+            value_key="p_batt_forecast",
+        )
+
+        soc_entity = published_entities.get("battery_soc_forecast")
+        soc_schedule: list[tuple[datetime, float]] = []
+        soc_target_default = 0
+        if soc_entity is not None:
+            soc_raw = self._coerce_float(soc_entity.state)
+            if soc_raw is not None:
+                if soc_raw <= 1.0:
+                    soc_raw *= 100.0
+                soc_target_default = int(max(0, min(100, round(soc_raw))))
+
+            soc_attrs = (
+                soc_entity.attributes if isinstance(soc_entity.attributes, dict) else {}
+            )
+            soc_table = soc_attrs.get("soc_batt_forecast")
+            if not isinstance(soc_table, dict | list):
+                soc_table = soc_attrs
+            soc_schedule = self._extract_schedule(
+                soc_table,
+                value_key="soc_batt_forecast",
+            )
+
+        slots: list[ExecutionSlotCommand] = []
+        if power_schedule:
+            for index, (slot_start, power_w) in enumerate(power_schedule):
+                p_bat_cmd = int(round(power_w))
+                if p_bat_cmd > _SLOT_POWER_THRESHOLD_W:
+                    op_mode = OperationMode.FORCED_DISCHARGE
+                elif p_bat_cmd < -_SLOT_POWER_THRESHOLD_W:
+                    op_mode = OperationMode.FORCED_CHARGE
+                else:
+                    p_bat_cmd = 0
+                    op_mode = OperationMode.IDLE
+
+                if index < len(soc_schedule):
+                    soc_value = soc_schedule[index][1]
+                    if soc_value <= 1.0:
+                        soc_value *= 100.0
+                    soc_target = int(max(0, min(100, round(soc_value))))
+                else:
+                    soc_target = soc_target_default
+
+                slots.append(
+                    ExecutionSlotCommand(
+                        slot_start=slot_start,
+                        p_bat_cmd=p_bat_cmd,
+                        soc_target=soc_target,
+                        grid_limit=0,
+                        op_mode=op_mode,
+                    )
+                )
+        else:
+            current_power_w: float | None = self._coerce_float(battery_entity.state)
+            if current_power_w is not None:
+                p_bat_cmd = int(round(current_power_w))
+                if p_bat_cmd > _SLOT_POWER_THRESHOLD_W:
+                    op_mode = OperationMode.FORCED_DISCHARGE
+                elif p_bat_cmd < -_SLOT_POWER_THRESHOLD_W:
+                    op_mode = OperationMode.FORCED_CHARGE
+                else:
+                    p_bat_cmd = 0
+                    op_mode = OperationMode.IDLE
+
+                slots.append(
+                    ExecutionSlotCommand(
+                        slot_start=now_utc,
+                        p_bat_cmd=p_bat_cmd,
+                        soc_target=soc_target_default,
+                        grid_limit=0,
+                        op_mode=op_mode,
+                    )
+                )
+
+        return ExecutionPlan(
+            slots=slots,
+            step_minutes=optimization_time_step_minutes,
+            timestamp=now_utc,
+            valid=bool(slots),
+            source="emhass_publish_entities",
+        )
+
     async def async_run_naive_optimization(
         self, inputs: OptimizationInputs
     ) -> dict[str, Any] | None:
@@ -513,12 +716,17 @@ class EmhassClient:
 
         await self._hass.async_block_till_done()
         published_entities = self._read_published_entities()
+        execution_plan = self._build_execution_plan(
+            published_entities,
+            optimization_time_step_minutes=optimization_time_step_minutes,
+        )
         self._log_published_entities(published_entities)
         _LOGGER.debug("EMHASS publish-data finished successfully")
 
         return {
             "publish_response": publish_response,
             "published_entities": published_entities,
+            "execution_plan": execution_plan,
         }
 
     async def async_run_naive_mpc(
@@ -554,4 +762,5 @@ class EmhassClient:
             optimization_response=optimization_result["optimization_response"],
             publish_response=publish_result["publish_response"],
             published_entities=publish_result["published_entities"],
+            execution_plan=publish_result["execution_plan"],
         )

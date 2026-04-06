@@ -19,12 +19,16 @@ from homeassistant.components.photoptimizer.const import (
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
     CONF_HORIZON_HOURS,
+    CONF_INVERTER_DISCHARGE_POWER_ENTITY,
+    CONF_INVERTER_MODE_ENTITY,
+    CONF_INVERTER_TYPE,
     CONF_KWP,
     CONF_RESOLUTION,
     CONF_WEAR_COST_PER_KWH,
     DEFAULT_HORIZON_HOURS,
     DEFAULT_RESOLUTION,
     DOMAIN,
+    INVERTER_TYPE_GOODWE,
 )
 from homeassistant.components.recorder import Recorder
 from homeassistant.const import CONF_API_KEY, CONF_LATITUDE, CONF_LONGITUDE
@@ -66,6 +70,15 @@ async def test_full_user_flow(
         },
     )
     assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "inverter_type"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            CONF_INVERTER_TYPE: INVERTER_TYPE_GOODWE,
+        },
+    )
+    assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "inverter"
 
     result = await hass.config_entries.flow.async_configure(
@@ -83,6 +96,8 @@ async def test_full_user_flow(
             CONF_WEAR_COST_PER_KWH: 0.01,
             CONF_EMHASS_URL: "http://localhost:5000",
             CONF_EMHASS_TOKEN: "secret-token",
+            CONF_INVERTER_MODE_ENTITY: "select.goodwe_mode",
+            CONF_INVERTER_DISCHARGE_POWER_ENTITY: "number.goodwe_discharge_power",
         },
     )
     await hass.async_block_till_done()
@@ -98,6 +113,7 @@ async def test_full_user_flow(
     assert result["data"][CONF_DECLINATION] == 40
     assert result["data"][CONF_KWP] == 6.44
     assert result["data"][CONF_API_KEY] == "api-key"
+    assert result["data"][CONF_INVERTER_TYPE] == INVERTER_TYPE_GOODWE
     assert (
         result["data"][CONF_CURRENT_SOLAR_PRODUCTION_ENTITY]
         == "sensor.solar_production"
@@ -113,6 +129,11 @@ async def test_full_user_flow(
     assert result["data"][CONF_WEAR_COST_PER_KWH] == 0.01
     assert result["data"][CONF_EMHASS_URL] == "http://localhost:5000"
     assert result["data"][CONF_EMHASS_TOKEN] == "secret-token"
+    assert result["data"][CONF_INVERTER_MODE_ENTITY] == "select.goodwe_mode"
+    assert (
+        result["data"][CONF_INVERTER_DISCHARGE_POWER_ENTITY]
+        == "number.goodwe_discharge_power"
+    )
     assert len(mock_setup_entry.mock_calls) == 1
 
 
@@ -145,6 +166,12 @@ async def test_abort_when_already_configured(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         {
+            CONF_INVERTER_TYPE: INVERTER_TYPE_GOODWE,
+        },
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
             CONF_CURRENT_SOLAR_PRODUCTION_ENTITY: "sensor.solar_production",
             CONF_CURRENT_CONSUMPTION_ENTITY: "sensor.home_consumption",
             CONF_BATTERY_SOC_ENTITY: "sensor.battery_soc",
@@ -156,6 +183,8 @@ async def test_abort_when_already_configured(
             CONF_BATTERY_DISCHARGE_POWER_MAX: 2200.0,
             CONF_WEAR_COST_PER_KWH: 0.01,
             CONF_EMHASS_URL: "http://localhost:5000",
+            CONF_INVERTER_MODE_ENTITY: "select.goodwe_mode",
+            CONF_INVERTER_DISCHARGE_POWER_ENTITY: "number.goodwe_discharge_power",
         },
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY

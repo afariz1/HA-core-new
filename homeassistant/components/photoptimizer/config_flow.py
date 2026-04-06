@@ -26,7 +26,14 @@ from .const import (
     CONF_ELECTRICITY_PRICE_ENTITY,
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
+    CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY,
+    CONF_GROWATT_DEVICE_ID,
+    CONF_GROWATT_INVERTER_VARIANT,
     CONF_HORIZON_HOURS,
+    CONF_INVERTER_CHARGE_POWER_ENTITY,
+    CONF_INVERTER_DISCHARGE_POWER_ENTITY,
+    CONF_INVERTER_MODE_ENTITY,
+    CONF_INVERTER_TYPE,
     CONF_KWP,
     CONF_RESOLUTION,
     CONF_WEAR_COST_PER_KWH,
@@ -40,6 +47,11 @@ from .const import (
     DEFAULT_RESOLUTION,
     DEFAULT_WEAR_COST_PER_KWH,
     DOMAIN,
+    GROWATT_VARIANT_AUTO,
+    GROWATT_VARIANT_MIN,
+    GROWATT_VARIANT_SPH,
+    INVERTER_TYPE_GOODWE,
+    INVERTER_TYPE_GROWATT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -132,7 +144,7 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             _LOGGER.debug("PV forecast step completed with unique_id=%s", unique_id)
 
-            return await self.async_step_inverter()
+            return await self.async_step_inverter_type()
 
         _LOGGER.debug("Showing PV forecast form")
 
@@ -149,6 +161,46 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="pv_forecast",
+            data_schema=data_schema,
+            errors=errors,
+        )
+
+    async def async_step_inverter_type(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Handle inverter type selection."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            _LOGGER.debug(
+                "Inverter type step received input: %s",
+                _redact_user_input(user_input),
+            )
+            self._data.update(user_input)
+            return await self.async_step_inverter()
+
+        data_schema = vol.Schema(
+            {
+                vol.Required(CONF_INVERTER_TYPE): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(
+                                value=INVERTER_TYPE_GOODWE,
+                                label="GoodWe",
+                            ),
+                            selector.SelectOptionDict(
+                                value=INVERTER_TYPE_GROWATT,
+                                label="Growatt",
+                            ),
+                        ],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="inverter_type",
             data_schema=data_schema,
             errors=errors,
         )
@@ -176,58 +228,124 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         _LOGGER.debug("Showing inverter form")
 
-        data_schema = vol.Schema(
+        data_fields: dict[Any, Any] = {
+            vol.Required(CONF_CURRENT_SOLAR_PRODUCTION_ENTITY): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["sensor"],
+                    multiple=False,
+                )
+            ),
+            vol.Required(CONF_CURRENT_CONSUMPTION_ENTITY): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["sensor"],
+                    multiple=False,
+                )
+            ),
+            vol.Required(CONF_BATTERY_SOC_ENTITY): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["sensor"],
+                    multiple=False,
+                )
+            ),
+            vol.Required(CONF_BATTERY_CAPACITY_KWH): vol.Coerce(float),
+            vol.Required(
+                CONF_BATTERY_SOC_RESERVE_PERCENT,
+                default=DEFAULT_BATTERY_SOC_RESERVE_PERCENT,
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+            vol.Required(
+                CONF_BATTERY_EFFICIENCY_ROUND_TRIP,
+                default=DEFAULT_BATTERY_EFFICIENCY_ROUND_TRIP,
+            ): vol.All(vol.Coerce(float), vol.Range(min=1, max=100)),
+            vol.Required(
+                CONF_BATTERY_TARGET_SOC_PERCENT,
+                default=DEFAULT_BATTERY_TARGET_SOC_PERCENT,
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+            vol.Required(
+                CONF_BATTERY_CHARGE_POWER_MAX,
+                default=DEFAULT_BATTERY_CHARGE_POWER_MAX,
+            ): vol.All(vol.Coerce(float), vol.Range(min=1)),
+            vol.Required(
+                CONF_BATTERY_DISCHARGE_POWER_MAX,
+                default=DEFAULT_BATTERY_DISCHARGE_POWER_MAX,
+            ): vol.All(vol.Coerce(float), vol.Range(min=1)),
+            vol.Required(
+                CONF_WEAR_COST_PER_KWH,
+                default=DEFAULT_WEAR_COST_PER_KWH,
+            ): vol.Coerce(float),
+            vol.Required(CONF_EMHASS_URL, default=DEFAULT_EMHASS_URL): str,
+            vol.Optional(CONF_EMHASS_TOKEN): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+            ),
+        }
+
+        inverter_type = self._data.get(CONF_INVERTER_TYPE)
+        data_fields.update(
             {
-                vol.Required(
-                    CONF_CURRENT_SOLAR_PRODUCTION_ENTITY
+                vol.Required(CONF_INVERTER_MODE_ENTITY): selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        domain=["select"],
+                        multiple=False,
+                    )
+                ),
+                vol.Optional(
+                    CONF_INVERTER_CHARGE_POWER_ENTITY
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(
-                        domain=["sensor"],
+                        domain=["number"],
                         multiple=False,
                     )
                 ),
-                vol.Required(CONF_CURRENT_CONSUMPTION_ENTITY): selector.EntitySelector(
+                vol.Required(
+                    CONF_INVERTER_DISCHARGE_POWER_ENTITY
+                ): selector.EntitySelector(
                     selector.EntitySelectorConfig(
-                        domain=["sensor"],
+                        domain=["number"],
                         multiple=False,
                     )
-                ),
-                vol.Required(CONF_BATTERY_SOC_ENTITY): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["sensor"],
-                        multiple=False,
-                    )
-                ),
-                vol.Required(CONF_BATTERY_CAPACITY_KWH): vol.Coerce(float),
-                vol.Required(
-                    CONF_BATTERY_SOC_RESERVE_PERCENT,
-                    default=DEFAULT_BATTERY_SOC_RESERVE_PERCENT,
-                ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
-                vol.Required(
-                    CONF_BATTERY_EFFICIENCY_ROUND_TRIP,
-                    default=DEFAULT_BATTERY_EFFICIENCY_ROUND_TRIP,
-                ): vol.All(vol.Coerce(float), vol.Range(min=1, max=100)),
-                vol.Required(
-                    CONF_BATTERY_TARGET_SOC_PERCENT,
-                    default=DEFAULT_BATTERY_TARGET_SOC_PERCENT,
-                ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
-                vol.Required(
-                    CONF_BATTERY_CHARGE_POWER_MAX,
-                    default=DEFAULT_BATTERY_CHARGE_POWER_MAX,
-                ): vol.All(vol.Coerce(float), vol.Range(min=1)),
-                vol.Required(
-                    CONF_BATTERY_DISCHARGE_POWER_MAX,
-                    default=DEFAULT_BATTERY_DISCHARGE_POWER_MAX,
-                ): vol.All(vol.Coerce(float), vol.Range(min=1)),
-                vol.Required(
-                    CONF_WEAR_COST_PER_KWH, default=DEFAULT_WEAR_COST_PER_KWH
-                ): vol.Coerce(float),
-                vol.Required(CONF_EMHASS_URL, default=DEFAULT_EMHASS_URL): str,
-                vol.Optional(CONF_EMHASS_TOKEN): selector.TextSelector(
-                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
             }
         )
+
+        if inverter_type == INVERTER_TYPE_GROWATT:
+            data_fields.update(
+                {
+                    vol.Optional(
+                        CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain=["switch"],
+                            multiple=False,
+                        )
+                    ),
+                    vol.Optional(CONF_GROWATT_DEVICE_ID): selector.DeviceSelector(
+                        selector.DeviceSelectorConfig(integration="growatt_server")
+                    ),
+                    vol.Optional(
+                        CONF_GROWATT_INVERTER_VARIANT,
+                        default=GROWATT_VARIANT_AUTO,
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(
+                                    value=GROWATT_VARIANT_AUTO,
+                                    label="Auto",
+                                ),
+                                selector.SelectOptionDict(
+                                    value=GROWATT_VARIANT_MIN,
+                                    label="MIN",
+                                ),
+                                selector.SelectOptionDict(
+                                    value=GROWATT_VARIANT_SPH,
+                                    label="SPH",
+                                ),
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            )
+
+        data_schema = vol.Schema(data_fields)
 
         return self.async_show_form(
             step_id="inverter",
