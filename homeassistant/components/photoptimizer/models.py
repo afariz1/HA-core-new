@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -23,11 +23,26 @@ class OptimizationBucket:
 
 
 @dataclass(slots=True)
+class DeferrableLoadDefinition:
+    """User-defined deferrable load that EMHASS may schedule."""
+
+    name: str
+    entity_id: str
+    nominal_power_w: float
+    operating_minutes: int
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly representation for coordinator data."""
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class OptimizationInputs:
     """Aggregated inputs passed from the coordinator to the EMHASS client."""
 
     timeline: list[OptimizationBucket]
     battery_soc: float
+    deferrable_loads: list[DeferrableLoadDefinition] = field(default_factory=list)
     raw_forecast_solar: Any | None = None
 
     @property
@@ -44,6 +59,17 @@ class OptimizationInputs:
         return int(
             (self.timeline[1].start - self.timeline[0].start).total_seconds() // 60
         )
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly representation for coordinator data."""
+        return {
+            "timeline": [bucket.as_dict() for bucket in self.timeline],
+            "battery_soc": self.battery_soc,
+            "deferrable_loads": [
+                deferrable_load.as_dict() for deferrable_load in self.deferrable_loads
+            ],
+            "raw_forecast_solar": self.raw_forecast_solar,
+        }
 
 
 @dataclass(slots=True)

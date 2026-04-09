@@ -28,10 +28,17 @@ from .const import (
 )
 from .goodwe_control import GoodweControlAdapter
 from .growatt_control import GrowattControlAdapter
-from .models import ExecutionPlan, ExecutionSlotCommand, OperationMode
+from .models import (
+    DeferrableLoadDefinition,
+    ExecutionPlan,
+    ExecutionSlotCommand,
+    OperationMode,
+    PublishedEntityState,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _MAX_ACCEPTABLE_SLOT_AGE = timedelta(minutes=30)
+_LOAD_POWER_THRESHOLD_W = 50.0
 
 
 class _InverterControlAdapter(Protocol):
@@ -49,6 +56,7 @@ class PhotoptimizerExecutor:
         self._hass = hass
         self._entry = entry
         self._last_signature: tuple[datetime, int, str] | None = None
+        self._last_deferrable_signatures: dict[str, bool] = {}
         self._controller = self._build_controller()
 
     async def async_execute_plan(self, execution_plan: ExecutionPlan | None) -> bool:
@@ -73,6 +81,46 @@ class PhotoptimizerExecutor:
         await self._controller.async_apply(command)
         self._last_signature = signature
         return True
+
+    async def async_execute_deferrable_loads(
+        self,
+        published_entities: dict[str, PublishedEntityState],
+        deferrable_loads: list[DeferrableLoadDefinition],
+    ) -> bool:
+        """Apply the current EMHASS deferrable-load state to switch entities."""
+        applied = False
+
+        for index, load in enumerate(deferrable_loads):
+            entity_key = f"deferrable_load_{index}"
+            published_entity = published_entities.get(entity_key)
+            if published_entity is None:
+                continue
+
+            desired_on = self._current_load_state(published_entity)
+            if desired_on is None:
+                continue
+
+            if self._last_deferrable_signatures.get(load.entity_id) == desired_on:
+                continue
+
+            service_name = "turn_on" if desired_on else "turn_off"
+            await self._hass.services.async_call(
+                "switch",
+                service_name,
+                {"entity_id": load.entity_id},
+                blocking=True,
+            )
+            self._last_deferrable_signatures[load.entity_id] = desired_on
+            applied = True
+
+            _LOGGER.debug(
+                "Applied deferrable load %s -> %s via %s",
+                load.name,
+                service_name,
+                load.entity_id,
+            )
+
+        return applied
 
     def _build_controller(self) -> _InverterControlAdapter:
         inverter_type = self._entry.data.get(CONF_INVERTER_TYPE)
@@ -154,6 +202,28 @@ class PhotoptimizerExecutor:
             grid_limit=0,
             op_mode=OperationMode.AUTO,
         )
+
+    def _current_load_state(
+        self, published_entity: PublishedEntityState
+    ) -> bool | None:
+        """Return desired on/off state from EMHASS load forecast."""
+        power = self._coerce_load_power(published_entity.state)
+        if power is None:
+            return None
+
+        return power > _LOAD_POWER_THRESHOLD_W
+
+    def _coerce_load_power(self, value: str | None) -> float | None:
+        """Convert EMHASS load forecast state to Watts when possible."""
+        if value is None:
+            return None
+
+        try:
+            numeric = float(value)
+        except TypeError, ValueError:
+            return None
+
+        return numeric
 
 
 class _NoopControlAdapter:

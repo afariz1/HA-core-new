@@ -28,6 +28,7 @@ from .const import (
     CONF_BATTERY_TARGET_SOC_PERCENT,
     CONF_CURRENT_CONSUMPTION_ENTITY,
     CONF_CURRENT_SOLAR_PRODUCTION_ENTITY,
+    CONF_DEFERRABLE_LOADS,
     CONF_ELECTRICITY_PRICE_ENTITY,
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
@@ -47,6 +48,7 @@ from .emhass_client import EmhassClient
 from .executor import PhotoptimizerExecutor
 from .mlforecast import MLForecastService
 from .models import (
+    DeferrableLoadDefinition,
     ExecutionPlan,
     OptimizationBucket,
     OptimizationInputs,
@@ -64,6 +66,34 @@ _OPTIMIZATION_TIME_STEP_MINUTES = 15
 class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     """Aggregate inputs for EMHASS and expose the combined result."""
 
+    @staticmethod
+    def _load_deferrable_loads(entry: ConfigEntry) -> list[DeferrableLoadDefinition]:
+        """Return configured deferrable loads from options or setup data."""
+        raw_loads = entry.options.get(CONF_DEFERRABLE_LOADS)
+        if raw_loads is None:
+            raw_loads = entry.data.get(CONF_DEFERRABLE_LOADS, [])
+
+        loads: list[DeferrableLoadDefinition] = []
+        for raw_load in raw_loads:
+            if not isinstance(raw_load, dict):
+                continue
+
+            try:
+                loads.append(
+                    DeferrableLoadDefinition(
+                        name=str(raw_load["name"]),
+                        entity_id=str(raw_load["entity_id"]),
+                        nominal_power_w=float(raw_load["nominal_power_w"]),
+                        operating_minutes=int(raw_load["operating_minutes"]),
+                    )
+                )
+            except KeyError, TypeError, ValueError:
+                _LOGGER.debug(
+                    "Skipping invalid deferrable load definition: %s", raw_load
+                )
+
+        return loads
+
     def __init__(
         self, hass: HomeAssistant, entry: ConfigEntry, client: ForecastSolar
     ) -> None:
@@ -77,6 +107,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         )
         self.client = client
         self.entry = entry
+        self.deferrable_loads = self._load_deferrable_loads(entry)
         self.emhass_url = entry.data.get(CONF_EMHASS_URL, DEFAULT_EMHASS_URL)
         self.emhass_token = entry.data.get(CONF_EMHASS_TOKEN)
         self.emhass = EmhassClient(
@@ -128,6 +159,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 CONF_WEAR_COST_PER_KWH,
                 DEFAULT_WEAR_COST_PER_KWH,
             ),
+            deferrable_loads=self.deferrable_loads,
         )
         self.ml_forecast = MLForecastService(hass, self)
         self.executor = PhotoptimizerExecutor(hass, entry)
@@ -141,6 +173,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_execution_plan: ExecutionPlan | None = None
         self._last_execution_utc: datetime | None = None
         self._last_execution_applied: bool | None = None
+        self._last_deferrable_loads_applied: bool | None = None
         self._optimizer_enabled: bool = True
         _LOGGER.debug(
             "Coordinator initialized for entry_id=%s emhass_url=%s token=%s",
@@ -353,6 +386,10 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 "battery_soc": optimization_inputs.battery_soc,
                 "prediction_horizon": optimization_inputs.prediction_horizon,
                 "optimization_time_step_minutes": optimization_inputs.optimization_time_step_minutes,
+                "deferrable_loads": [
+                    deferrable_load.as_dict()
+                    for deferrable_load in optimization_inputs.deferrable_loads
+                ],
             },
             "raw": {"forecast_solar": raw_pv},
             "emhass": {
@@ -384,6 +421,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                     else self._last_execution_utc.isoformat()
                 ),
                 "last_execution_applied": self._last_execution_applied,
+                "last_deferrable_loads_applied": self._last_deferrable_loads_applied,
             },
         }
 
@@ -452,6 +490,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             OptimizationInputs(
                 timeline=timeline,
                 battery_soc=self._read_battery_soc(),
+                deferrable_loads=self.deferrable_loads,
                 raw_forecast_solar=raw_pv,
             ),
             raw_pv,
@@ -958,6 +997,12 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                                 self._last_execution_plan
                             )
                         )
+                        self._last_deferrable_loads_applied = (
+                            await self.executor.async_execute_deferrable_loads(
+                                self._last_published_entities,
+                                self.deferrable_loads,
+                            )
+                        )
                         self._last_execution_utc = dt_util.utcnow()
                     except (
                         HomeAssistantError,
@@ -965,6 +1010,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                         ValueError,
                     ) as err:
                         self._last_execution_applied = False
+                        self._last_deferrable_loads_applied = False
                         _LOGGER.warning("Executor apply failed: %s", err)
 
                     if _LOGGER.isEnabledFor(logging.DEBUG):

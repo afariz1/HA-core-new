@@ -13,9 +13,11 @@ from homeassistant.components.photoptimizer.const import (
 )
 from homeassistant.components.photoptimizer.executor import PhotoptimizerExecutor
 from homeassistant.components.photoptimizer.models import (
+    DeferrableLoadDefinition,
     ExecutionPlan,
     ExecutionSlotCommand,
     OperationMode,
+    PublishedEntityState,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -127,3 +129,35 @@ async def test_executor_fallbacks_to_auto_on_non_optimal_status(
         "entity_id": "number.goodwe_discharge_power",
         "value": 0,
     }
+
+
+async def test_executor_applies_deferrable_load_switch_state(
+    hass: HomeAssistant,
+) -> None:
+    """Apply EMHASS deferrable-load output to a switch entity."""
+    executor = _build_executor(hass)
+    published_entities = {
+        "deferrable_load_0": PublishedEntityState(
+            entity_id="sensor.p_deferrable0",
+            state="500",
+            attributes={},
+        )
+    }
+    deferrable_loads = [
+        DeferrableLoadDefinition(
+            name="Dishwasher",
+            entity_id="switch.dishwasher",
+            nominal_power_w=1200.0,
+            operating_minutes=90,
+        )
+    ]
+
+    switch_calls = async_mock_service(hass, "switch", "turn_on")
+    applied = await executor.async_execute_deferrable_loads(
+        published_entities,
+        deferrable_loads,
+    )
+
+    assert applied is True
+    assert len(switch_calls) == 1
+    assert switch_calls[0].data == {"entity_id": "switch.dishwasher"}

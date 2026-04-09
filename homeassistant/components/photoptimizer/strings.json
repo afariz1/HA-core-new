@@ -9,6 +9,32 @@
       "unknown": "Unexpected error occurred"
     },
     "step": {
+      "deferrable_load": {
+        "data": {
+          "entity_id": "Switch entity",
+          "name": "Load name",
+          "nominal_power_w": "Nominal power (W)",
+          "operating_minutes": "Minimum operating time (minutes)"
+        },
+        "data_description": {
+          "entity_id": "Switch entity that will be turned on or off from the EMHASS result.",
+          "name": "User-facing label for the deferrable load.",
+          "nominal_power_w": "Nominal power used by EMHASS when scheduling the load.",
+          "operating_minutes": "Minimum runtime that EMHASS should keep the load active."
+        },
+        "description": "Define one deferrable load.",
+        "title": "Configure deferrable load"
+      },
+      "deferrable_load_count": {
+        "data": {
+          "deferrable_load_count": "Deferrable load count"
+        },
+        "data_description": {
+          "deferrable_load_count": "Number of switch-based deferrable loads to configure (0 to 2)."
+        },
+        "description": "Choose how many deferrable loads should be managed by EMHASS.",
+        "title": "Configure deferrable loads"
+      },
       "electricity_price": {
         "data": {
           "electricity_price_entity": "Electricity price entity"
@@ -100,6 +126,36 @@
         },
         "description": "Update the EMHASS URL or access token.",
         "title": "Reconfigure EMHASS connection"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "deferrable_load": {
+        "data": {
+          "entity_id": "Switch entity",
+          "name": "Load name",
+          "nominal_power_w": "Nominal power (W)",
+          "operating_minutes": "Minimum operating time (minutes)"
+        },
+        "data_description": {
+          "entity_id": "Switch entity that will be turned on or off from the EMHASS result.",
+          "name": "User-facing label for the deferrable load.",
+          "nominal_power_w": "Nominal power used by EMHASS when scheduling the load.",
+          "operating_minutes": "Minimum runtime that EMHASS should keep the load active."
+        },
+        "description": "Define one deferrable load.",
+        "title": "Configure deferrable load"
+      },
+      "init": {
+        "data": {
+          "deferrable_load_count": "Deferrable load count"
+        },
+        "data_description": {
+          "deferrable_load_count": "Number of switch-based deferrable loads to configure (0 to 2)."
+        },
+        "description": "Choose how many deferrable loads should be managed by EMHASS.",
+        "title": "Configure deferrable loads"
       }
     }
   },

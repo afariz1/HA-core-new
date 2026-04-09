@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
+import math
 from numbers import Real
 from typing import Any
 
@@ -14,6 +15,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
 from .models import (
+    DeferrableLoadDefinition,
     EmhassExecutionResult,
     ExecutionPlan,
     ExecutionSlotCommand,
@@ -54,6 +56,7 @@ class EmhassClient:
         battery_charge_power_max_w: float,
         battery_discharge_power_max_w: float,
         wear_cost_per_kwh: float,
+        deferrable_loads: list[DeferrableLoadDefinition] | None = None,
     ) -> None:
         """Store session, base URL, publish targets, and runtime defaults."""
         self._hass = hass
@@ -89,6 +92,7 @@ class EmhassClient:
             DEFAULT_BATTERY_MAXIMUM_STATE_OF_CHARGE,
         )
         self._wear_cost_per_kwh = wear_cost_per_kwh
+        self._deferrable_loads = deferrable_loads or []
 
         self._published_entities: dict[str, dict[str, str]] = {
             "pv_forecast": {
@@ -137,6 +141,14 @@ class EmhassClient:
                 "friendly_name": "EMHASS optimization status",
             },
         }
+
+        for index, load in enumerate(self._deferrable_loads):
+            self._published_entities[f"deferrable_load_{index}"] = {
+                "entity_id": f"sensor.p_deferrable{index}",
+                "unit_of_measurement": "W",
+                "friendly_name": load.name,
+            }
+
         _LOGGER.debug(
             "EMHASS client initialized: url=%s token=%s battery_capacity_wh=%s efficiency=%s soc_reserve=%s soc_target=%s charge_max_w=%s discharge_max_w=%s wear_cost=%s",
             self._url,
@@ -149,6 +161,35 @@ class EmhassClient:
             self._battery_discharge_power_max,
             self._wear_cost_per_kwh,
         )
+
+    def _deferrable_load_runtimeparams(self, step_minutes: int) -> dict[str, Any]:
+        """Build runtime parameters for configured deferrable loads."""
+        if not self._deferrable_loads:
+            return {"number_of_deferrable_loads": 0}
+
+        operating_timesteps = [
+            max(1, math.ceil(load.operating_minutes / step_minutes))
+            for load in self._deferrable_loads
+        ]
+        def_current_state = []
+        for load in self._deferrable_loads:
+            state = self._hass.states.get(load.entity_id)
+            def_current_state.append(
+                bool(state is not None and str(state.state).lower() == "on")
+            )
+
+        return {
+            "number_of_deferrable_loads": len(self._deferrable_loads),
+            "nominal_power_of_deferrable_loads": [
+                load.nominal_power_w for load in self._deferrable_loads
+            ],
+            "operating_timesteps_of_each_deferrable_load": operating_timesteps,
+            "def_current_state": def_current_state,
+        }
+
+    def _deferrable_load_publish_payload(self) -> list[dict[str, Any]]:
+        """Build publish-data config entries for configured deferrable loads."""
+        return [{} for _ in self._deferrable_loads]
 
     def _headers(self) -> dict[str, str]:
         """Return headers for EMHASS HTTP requests."""
@@ -323,9 +364,12 @@ class EmhassClient:
             "battery_target_state_of_charge": self._battery_target_soc,
             "battery_minimum_state_of_charge": self._battery_soc_reserve,
             "battery_maximum_state_of_charge": DEFAULT_BATTERY_MAXIMUM_STATE_OF_CHARGE,
-            "number_of_deferrable_loads": 0,
             "continual_publish": False,
         }
+
+        runtimeparams.update(
+            self._deferrable_load_runtimeparams(inputs.optimization_time_step_minutes)
+        )
 
         if self._wear_cost_per_kwh > 0:
             runtimeparams["weight_battery_charge"] = self._wear_cost_per_kwh
@@ -343,11 +387,14 @@ class EmhassClient:
         self, optimization_time_step_minutes: int
     ) -> dict[str, Any]:
         """Build the minimal publish-data payload."""
-        payload = {
+        payload: dict[str, Any] = {
             "optimization_time_step": optimization_time_step_minutes,
-            "number_of_deferrable_loads": 0,
             "set_use_battery": True,
         }
+        payload.update(
+            self._deferrable_load_runtimeparams(optimization_time_step_minutes)
+        )
+        payload["def_load_config"] = self._deferrable_load_publish_payload()
         _LOGGER.debug(
             "Built publish payload: optimization_time_step=%s keys=%s",
             optimization_time_step_minutes,

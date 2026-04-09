@@ -18,6 +18,12 @@ CONF_API_KEY = "api_key"
 CONF_EMHASS_URL = "emhass_url"
 CONF_EMHASS_TOKEN = "emhass_token"
 
+CONF_DEFERRABLE_LOADS = "deferrable_loads"
+CONF_DEFERRABLE_LOAD_NAME = "name"
+CONF_DEFERRABLE_LOAD_ENTITY = "entity_id"
+CONF_DEFERRABLE_LOAD_NOMINAL_POWER = "nominal_power_w"
+CONF_DEFERRABLE_LOAD_OPERATING_MINUTES = "operating_minutes"
+
 CONF_BATTERY_CAPACITY_KWH = "battery_capacity_kwh"
 CONF_BATTERY_SOC_ENTITY = "battery_soc_entity"
 CONF_BATTERY_SOC_RESERVE_PERCENT = "battery_soc_reserve_percent"

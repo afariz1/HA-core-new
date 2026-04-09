@@ -23,6 +23,11 @@ from .const import (
     CONF_CURRENT_CONSUMPTION_ENTITY,
     CONF_CURRENT_SOLAR_PRODUCTION_ENTITY,
     CONF_DECLINATION,
+    CONF_DEFERRABLE_LOAD_ENTITY,
+    CONF_DEFERRABLE_LOAD_NAME,
+    CONF_DEFERRABLE_LOAD_NOMINAL_POWER,
+    CONF_DEFERRABLE_LOAD_OPERATING_MINUTES,
+    CONF_DEFERRABLE_LOADS,
     CONF_ELECTRICITY_PRICE_ENTITY,
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
@@ -58,6 +63,38 @@ _LOGGER = logging.getLogger(__name__)
 _SENSITIVE_FIELDS = {CONF_API_KEY, CONF_EMHASS_TOKEN}
 
 
+def _deferrable_load_defaults(load_index: int) -> dict[str, Any]:
+    """Return suggested defaults for one deferrable load."""
+    return {
+        CONF_DEFERRABLE_LOAD_NAME: f"Load {load_index + 1}",
+        CONF_DEFERRABLE_LOAD_NOMINAL_POWER: 1000.0,
+        CONF_DEFERRABLE_LOAD_OPERATING_MINUTES: 60,
+    }
+
+
+def _deferrable_load_schema(defaults: dict[str, Any]) -> vol.Schema:
+    """Build schema for one deferrable load."""
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_DEFERRABLE_LOAD_NAME,
+                default=defaults[CONF_DEFERRABLE_LOAD_NAME],
+            ): str,
+            vol.Required(CONF_DEFERRABLE_LOAD_ENTITY): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["switch"], multiple=False)
+            ),
+            vol.Required(
+                CONF_DEFERRABLE_LOAD_NOMINAL_POWER,
+                default=defaults[CONF_DEFERRABLE_LOAD_NOMINAL_POWER],
+            ): vol.All(vol.Coerce(float), vol.Range(min=1)),
+            vol.Required(
+                CONF_DEFERRABLE_LOAD_OPERATING_MINUTES,
+                default=defaults[CONF_DEFERRABLE_LOAD_OPERATING_MINUTES],
+            ): vol.All(vol.Coerce(int), vol.Range(min=1)),
+        }
+    )
+
+
 def _redact_user_input(user_input: dict[str, Any]) -> dict[str, Any]:
     """Return log-safe copy of flow user input."""
     return {
@@ -72,9 +109,19 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     MINOR_VERSION = 1
 
+    @staticmethod
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> PhotoptimizerOptionsFlow:
+        """Return the options flow handler."""
+        return PhotoptimizerOptionsFlow(config_entry)
+
     def __init__(self) -> None:
         """Initialize the config flow."""
         self._data: dict[str, Any] = {}
+        self._deferrable_load_count = 0
+        self._deferrable_load_index = 0
+        self._deferrable_loads: list[dict[str, Any]] = []
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -219,12 +266,7 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._data.update(user_input)
             _LOGGER.debug("Inverter data step completed")
 
-            _LOGGER.info("Creating Photoptimizer config entry")
-            _LOGGER.debug(
-                "Config entry data keys: %s",
-                sorted(self._data.keys()),
-            )
-            return self.async_create_entry(title="Photoptimizer", data=self._data)
+            return await self.async_step_deferrable_load_count()
 
         _LOGGER.debug("Showing inverter form")
 
@@ -353,6 +395,75 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_deferrable_load_count(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Select how many deferrable loads should be configured."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            self._deferrable_load_count = int(user_input["deferrable_load_count"])
+            self._deferrable_load_index = 0
+            self._deferrable_loads = []
+
+            if self._deferrable_load_count == 0:
+                self._data[CONF_DEFERRABLE_LOADS] = []
+                _LOGGER.info("Creating Photoptimizer config entry")
+                _LOGGER.debug(
+                    "Config entry data keys: %s",
+                    sorted(self._data.keys()),
+                )
+                return self.async_create_entry(title="Photoptimizer", data=self._data)
+
+            return await self.async_step_deferrable_load()
+
+        data_schema = vol.Schema(
+            {
+                vol.Required("deferrable_load_count", default=0): vol.All(
+                    vol.Coerce(int), vol.In([0, 1, 2])
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="deferrable_load_count",
+            data_schema=data_schema,
+            errors=errors,
+        )
+
+    async def async_step_deferrable_load(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Configure one deferrable load definition."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            self._deferrable_loads.append(user_input)
+            self._deferrable_load_index += 1
+
+            if self._deferrable_load_index >= self._deferrable_load_count:
+                self._data[CONF_DEFERRABLE_LOADS] = self._deferrable_loads
+                _LOGGER.info("Creating Photoptimizer config entry")
+                _LOGGER.debug(
+                    "Config entry data keys: %s",
+                    sorted(self._data.keys()),
+                )
+                return self.async_create_entry(title="Photoptimizer", data=self._data)
+
+            return await self.async_step_deferrable_load()
+
+        defaults = _deferrable_load_defaults(self._deferrable_load_index)
+        data_schema = self.add_suggested_values_to_schema(
+            _deferrable_load_schema(defaults),
+            defaults,
+        )
+
+        return self.async_show_form(
+            step_id="deferrable_load",
+            data_schema=data_schema,
+            errors=errors,
+        )
+
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
@@ -397,3 +508,88 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             errors={},
         )
+
+
+class PhotoptimizerOptionsFlow(config_entries.OptionsFlowWithReload):
+    """Options flow for editing deferrable loads."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize the options flow."""
+        self._config_entry = config_entry
+        self._existing_deferrable_loads: list[dict[str, Any]] = list(
+            config_entry.options.get(
+                CONF_DEFERRABLE_LOADS,
+                config_entry.data.get(CONF_DEFERRABLE_LOADS, []),
+            )
+        )
+        self._deferrable_loads: list[dict[str, Any]] = []
+        self._deferrable_load_count = len(self._existing_deferrable_loads)
+        self._deferrable_load_index = 0
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Start the options flow."""
+        if user_input is not None:
+            self._deferrable_load_count = int(user_input["deferrable_load_count"])
+            self._deferrable_load_index = 0
+            self._deferrable_loads = []
+
+            if self._deferrable_load_count == 0:
+                return self.async_create_entry(
+                    title="",
+                    data={CONF_DEFERRABLE_LOADS: []},
+                )
+
+            return await self.async_step_deferrable_load()
+
+        data_schema = vol.Schema(
+            {
+                vol.Required(
+                    "deferrable_load_count", default=min(self._deferrable_load_count, 2)
+                ): vol.All(vol.Coerce(int), vol.In([0, 1, 2])),
+            }
+        )
+
+        return self.async_show_form(step_id="init", data_schema=data_schema)
+
+    async def async_step_deferrable_load(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Edit one deferrable load definition."""
+        if user_input is not None:
+            self._deferrable_loads.append(user_input)
+            self._deferrable_load_index += 1
+
+            if self._deferrable_load_index >= self._deferrable_load_count:
+                return self.async_create_entry(
+                    title="",
+                    data={CONF_DEFERRABLE_LOADS: self._deferrable_loads},
+                )
+
+            return await self.async_step_deferrable_load()
+
+        if self._deferrable_load_index < len(self._existing_deferrable_loads):
+            existing_load = self._existing_deferrable_loads[self._deferrable_load_index]
+        else:
+            existing_load = {}
+        defaults = {
+            CONF_DEFERRABLE_LOAD_NAME: existing_load.get(
+                CONF_DEFERRABLE_LOAD_NAME,
+                f"Load {self._deferrable_load_index + 1}",
+            ),
+            CONF_DEFERRABLE_LOAD_NOMINAL_POWER: existing_load.get(
+                CONF_DEFERRABLE_LOAD_NOMINAL_POWER,
+                1000.0,
+            ),
+            CONF_DEFERRABLE_LOAD_OPERATING_MINUTES: existing_load.get(
+                CONF_DEFERRABLE_LOAD_OPERATING_MINUTES,
+                60,
+            ),
+        }
+        data_schema = self.add_suggested_values_to_schema(
+            _deferrable_load_schema(defaults),
+            defaults,
+        )
+
+        return self.async_show_form(step_id="deferrable_load", data_schema=data_schema)
