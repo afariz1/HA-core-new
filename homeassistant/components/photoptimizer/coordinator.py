@@ -32,7 +32,6 @@ from .const import (
     CONF_ELECTRICITY_PRICE_ENTITY,
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
-    CONF_HORIZON_HOURS,
     CONF_TIMEZONE,
     CONF_WEAR_COST_PER_KWH,
     DEFAULT_BATTERY_CHARGE_POWER_MAX,
@@ -428,13 +427,35 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     async def _async_collect_inputs(self) -> tuple[OptimizationInputs, Any | None]:
         """Collect timeline and plant inputs needed for EMHASS calls."""
         timeline: list[OptimizationBucket] = []
-        horizon_hours = self.entry.data.get(CONF_HORIZON_HOURS, DEFAULT_HORIZON_HOURS)
         tz_name = self.entry.data.get(CONF_TIMEZONE) or self.hass.config.time_zone
         tz = dt_util.get_time_zone(tz_name) or dt_util.UTC
         step_minutes = _OPTIMIZATION_TIME_STEP_MINUTES
         now = dt_util.now(tz).replace(second=0, microsecond=0)
         aligned_minute = (now.minute // step_minutes) * step_minutes
         now = now.replace(minute=aligned_minute)
+        horizon_hours = DEFAULT_HORIZON_HOURS
+
+        price_entity = self.entry.data.get(CONF_ELECTRICITY_PRICE_ENTITY)
+        if price_entity:
+            detected_price_horizon_hours = await self._detect_price_horizon_hours(
+                price_entity,
+                now,
+                tz,
+            )
+            if detected_price_horizon_hours <= 0:
+                self._raise_update_failed(
+                    f"Price entity {price_entity} has no future spot-price data"
+                )
+
+            horizon_hours = min(horizon_hours, detected_price_horizon_hours)
+            _LOGGER.debug(
+                "Spot-price horizon detected from %s: detected=%s configured=%s effective=%s",
+                price_entity,
+                detected_price_horizon_hours,
+                DEFAULT_HORIZON_HOURS,
+                horizon_hours,
+            )
+
         bucket_count = max(1, int((horizon_hours * 60) / step_minutes))
         _LOGGER.debug(
             "Collecting inputs: horizon_hours=%s step_minutes=%s timezone=%s start=%s buckets=%s",
@@ -456,10 +477,15 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 )
             )
 
-        price_entity = self.entry.data.get(CONF_ELECTRICITY_PRICE_ENTITY)
         if price_entity:
             _LOGGER.debug("Using electricity price entity: %s", price_entity)
-            await self._hourly_from_price_entity(price_entity, timeline)
+            mapped_price_hours = await self._hourly_from_price_entity(
+                price_entity, timeline
+            )
+            if mapped_price_hours <= 0:
+                self._raise_update_failed(
+                    f"Price entity {price_entity} contains no usable price points"
+                )
         else:
             _LOGGER.debug("No electricity price entity configured")
 
@@ -496,9 +522,46 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             raw_pv,
         )
 
+    async def _detect_price_horizon_hours(
+        self,
+        entity_id: str,
+        start: datetime,
+        tz,
+    ) -> int:
+        """Return contiguous available future spot-price hours from aligned start."""
+        state = await self._async_get_state_with_startup_wait(entity_id)
+        if state is None:
+            raise UpdateFailed(f"Price entity {entity_id} not found")
+
+        start_hour = start.replace(minute=0, second=0, microsecond=0)
+        available_hours: set[datetime] = set()
+
+        for key, value in state.attributes.items():
+            if self._coerce_float(value) is None:
+                continue
+
+            dt = dt_util.parse_datetime(str(key))
+            if dt is None:
+                continue
+
+            dt_local = dt_util.as_local(dt).astimezone(tz)
+            hour_start = dt_local.replace(minute=0, second=0, microsecond=0)
+            if hour_start < start_hour:
+                continue
+
+            available_hours.add(hour_start)
+
+        contiguous_hours = 0
+        probe = start_hour
+        while probe in available_hours:
+            contiguous_hours += 1
+            probe += timedelta(hours=1)
+
+        return contiguous_hours
+
     async def _hourly_from_price_entity(
         self, entity_id: str, buckets: list[OptimizationBucket]
-    ) -> None:
+    ) -> int:
         state = await self._async_get_state_with_startup_wait(entity_id)
 
         if state is None:
@@ -511,36 +574,31 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         for bucket in buckets:
             hour_start = bucket.start.replace(minute=0, second=0, microsecond=0)
             hour_bucket_index.setdefault(hour_start, []).append(bucket)
-        mapped_points = 0
+        mapped_hours: set[datetime] = set()
 
         for key, value in state.attributes.items():
-            if isinstance(value, (int, float)):
-                dt = dt_util.parse_datetime(str(key))
-                if dt is None:
-                    continue
-                dt_local = dt_util.as_local(dt).astimezone(tz)
-                hour_start = dt_local.replace(minute=0, second=0, microsecond=0)
-                target_buckets = hour_bucket_index.get(hour_start)
-                if target_buckets:
-                    for bucket in target_buckets:
-                        bucket.price = float(value)
-                    mapped_points += 1
+            numeric = self._coerce_float(value)
+            if numeric is None:
+                continue
 
-        last_price: float | None = None
-        filled_points = 0
-        for bucket in buckets:
-            if bucket.price != 0.0:
-                last_price = bucket.price
-            elif last_price is not None:
-                bucket.price = last_price
-                filled_points += 1
+            dt = dt_util.parse_datetime(str(key))
+            if dt is None:
+                continue
+
+            dt_local = dt_util.as_local(dt).astimezone(tz)
+            hour_start = dt_local.replace(minute=0, second=0, microsecond=0)
+            target_buckets = hour_bucket_index.get(hour_start)
+            if target_buckets:
+                for bucket in target_buckets:
+                    bucket.price = numeric
+                mapped_hours.add(hour_start)
 
         _LOGGER.debug(
-            "Price timeline populated from %s: mapped=%s forward_filled=%s",
+            "Price timeline populated from %s: mapped_hours=%s",
             entity_id,
-            mapped_points,
-            filled_points,
+            len(mapped_hours),
         )
+        return len(mapped_hours)
 
     async def _hourly_from_load_entity(
         self, entity_id: str, buckets: list[OptimizationBucket]

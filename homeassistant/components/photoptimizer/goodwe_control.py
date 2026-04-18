@@ -7,12 +7,13 @@ import logging
 
 from homeassistant.core import HomeAssistant
 
+from .inverter_interface import InverterControlAdapter
 from .models import ExecutionSlotCommand, OperationMode
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class GoodweControlAdapter:
+class GoodweControlAdapter(InverterControlAdapter):
     """Apply normalized battery commands to GoodWe entities/services."""
 
     def __init__(

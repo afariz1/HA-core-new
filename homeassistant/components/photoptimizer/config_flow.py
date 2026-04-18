@@ -34,13 +34,11 @@ from .const import (
     CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY,
     CONF_GROWATT_DEVICE_ID,
     CONF_GROWATT_INVERTER_VARIANT,
-    CONF_HORIZON_HOURS,
     CONF_INVERTER_CHARGE_POWER_ENTITY,
     CONF_INVERTER_DISCHARGE_POWER_ENTITY,
     CONF_INVERTER_MODE_ENTITY,
     CONF_INVERTER_TYPE,
     CONF_KWP,
-    CONF_RESOLUTION,
     CONF_WEAR_COST_PER_KWH,
     DEFAULT_BATTERY_CHARGE_POWER_MAX,
     DEFAULT_BATTERY_DISCHARGE_POWER_MAX,
@@ -48,8 +46,6 @@ from .const import (
     DEFAULT_BATTERY_SOC_RESERVE_PERCENT,
     DEFAULT_BATTERY_TARGET_SOC_PERCENT,
     DEFAULT_EMHASS_URL,
-    DEFAULT_HORIZON_HOURS,
-    DEFAULT_RESOLUTION,
     DEFAULT_WEAR_COST_PER_KWH,
     DOMAIN,
     GROWATT_VARIANT_AUTO,
@@ -126,15 +122,8 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Initial step, use defaults and continue."""
+        """Initial step, continue directly to required user inputs."""
         _LOGGER.debug("Config flow user step started")
-        self._data[CONF_HORIZON_HOURS] = DEFAULT_HORIZON_HOURS
-        self._data[CONF_RESOLUTION] = DEFAULT_RESOLUTION
-        _LOGGER.debug(
-            "Config flow defaults set: horizon_hours=%s resolution=%s",
-            self._data[CONF_HORIZON_HOURS],
-            self._data[CONF_RESOLUTION],
-        )
         return await self.async_step_electricity_price()
 
     async def async_step_electricity_price(

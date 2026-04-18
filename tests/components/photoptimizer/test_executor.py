@@ -5,11 +5,17 @@ from __future__ import annotations
 from datetime import timedelta
 
 from homeassistant.components.photoptimizer.const import (
+    CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY,
+    CONF_GROWATT_DEVICE_ID,
+    CONF_GROWATT_INVERTER_VARIANT,
+    CONF_INVERTER_CHARGE_POWER_ENTITY,
     CONF_INVERTER_DISCHARGE_POWER_ENTITY,
     CONF_INVERTER_MODE_ENTITY,
     CONF_INVERTER_TYPE,
     DOMAIN,
+    GROWATT_VARIANT_SPH,
     INVERTER_TYPE_GOODWE,
+    INVERTER_TYPE_GROWATT,
 )
 from homeassistant.components.photoptimizer.executor import PhotoptimizerExecutor
 from homeassistant.components.photoptimizer.models import (
@@ -38,6 +44,23 @@ def _build_executor(hass: HomeAssistant) -> PhotoptimizerExecutor:
     return PhotoptimizerExecutor(hass, entry)
 
 
+def _build_growatt_executor(hass: HomeAssistant) -> PhotoptimizerExecutor:
+    """Create executor with Growatt mapping."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_INVERTER_TYPE: INVERTER_TYPE_GROWATT,
+            CONF_INVERTER_MODE_ENTITY: "select.growatt_mode",
+            CONF_INVERTER_DISCHARGE_POWER_ENTITY: "number.growatt_discharge_power",
+            CONF_INVERTER_CHARGE_POWER_ENTITY: "number.growatt_charge_power",
+            CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY: "switch.growatt_ac_charge",
+            CONF_GROWATT_DEVICE_ID: "test_device_123",
+            CONF_GROWATT_INVERTER_VARIANT: GROWATT_VARIANT_SPH,
+        },
+    )
+    return PhotoptimizerExecutor(hass, entry)
+
+
 async def test_executor_applies_goodwe_discharge_command(hass: HomeAssistant) -> None:
     """Apply discharge command from normalized execution plan."""
     executor = _build_executor(hass)
@@ -58,6 +81,7 @@ async def test_executor_applies_goodwe_discharge_command(hass: HomeAssistant) ->
 
     number_calls = async_mock_service(hass, "number", "set_value")
     select_calls = async_mock_service(hass, "select", "select_option")
+    async_mock_service(hass, "switch", "turn_off")
     applied = await executor.async_execute_plan(execution_plan)
 
     assert applied is True
@@ -94,6 +118,7 @@ async def test_executor_skips_stale_schedule(hass: HomeAssistant) -> None:
 
     number_calls = async_mock_service(hass, "number", "set_value")
     select_calls = async_mock_service(hass, "select", "select_option")
+    async_mock_service(hass, "switch", "turn_off")
     applied = await executor.async_execute_plan(execution_plan)
 
     assert applied is False
@@ -116,6 +141,7 @@ async def test_executor_fallbacks_to_auto_on_non_optimal_status(
 
     number_calls = async_mock_service(hass, "number", "set_value")
     select_calls = async_mock_service(hass, "select", "select_option")
+    async_mock_service(hass, "switch", "turn_off")
     applied = await executor.async_execute_plan(execution_plan)
 
     assert applied is True
@@ -161,3 +187,125 @@ async def test_executor_applies_deferrable_load_switch_state(
     assert applied is True
     assert len(switch_calls) == 1
     assert switch_calls[0].data == {"entity_id": "switch.dishwasher"}
+
+
+async def test_executor_applies_growatt_discharge_command(hass: HomeAssistant) -> None:
+    """Apply Growatt discharge command via select/number service calls."""
+    executor = _build_growatt_executor(hass)
+    execution_plan = ExecutionPlan(
+        slots=[
+            ExecutionSlotCommand(
+                slot_start=dt_util.utcnow(),
+                p_bat_cmd=700,
+                soc_target=45,
+                grid_limit=0,
+                op_mode=OperationMode.FORCED_DISCHARGE,
+            )
+        ],
+        step_minutes=5,
+        timestamp=dt_util.utcnow(),
+        valid=True,
+    )
+
+    number_calls = async_mock_service(hass, "number", "set_value")
+    select_calls = async_mock_service(hass, "select", "select_option")
+    switch_calls = async_mock_service(hass, "switch", "turn_off")
+    growatt_service_calls = async_mock_service(
+        hass, "growatt_server", "write_ac_discharge_times"
+    )
+    applied = await executor.async_execute_plan(execution_plan)
+
+    assert applied is True
+    # Should set discharge power and mode.
+    assert len(number_calls) == 1
+    assert number_calls[0].data["entity_id"] == "number.growatt_discharge_power"
+    assert number_calls[0].data["value"] == 14  # (700 / 5000) * 100
+    assert len(select_calls) == 1
+    assert select_calls[0].data == {
+        "entity_id": "select.growatt_mode",
+        "option": "eco_discharge",
+    }
+    # Should turn off AC charge.
+    assert len(switch_calls) >= 1
+    assert any(s.data["entity_id"] == "switch.growatt_ac_charge" for s in switch_calls)
+    # Should call Growatt variant service.
+    assert len(growatt_service_calls) >= 1
+
+
+async def test_executor_applies_growatt_charge_command(hass: HomeAssistant) -> None:
+    """Apply Growatt charge command via select/number service calls."""
+    executor = _build_growatt_executor(hass)
+    execution_plan = ExecutionPlan(
+        slots=[
+            ExecutionSlotCommand(
+                slot_start=dt_util.utcnow(),
+                p_bat_cmd=-600,
+                soc_target=90,
+                grid_limit=0,
+                op_mode=OperationMode.FORCED_CHARGE,
+            )
+        ],
+        step_minutes=5,
+        timestamp=dt_util.utcnow(),
+        valid=True,
+    )
+
+    number_calls = async_mock_service(hass, "number", "set_value")
+    select_calls = async_mock_service(hass, "select", "select_option")
+    switch_calls = async_mock_service(hass, "switch", "turn_on")
+    growatt_service_calls = async_mock_service(
+        hass, "growatt_server", "write_ac_charge_times"
+    )
+    applied = await executor.async_execute_plan(execution_plan)
+
+    assert applied is True
+    # Should set charge power and mode.
+    assert len(number_calls) == 1
+    assert number_calls[0].data["entity_id"] == "number.growatt_charge_power"
+    assert number_calls[0].data["value"] == 12  # (600 / 5000) * 100
+    assert len(select_calls) == 1
+    assert select_calls[0].data == {
+        "entity_id": "select.growatt_mode",
+        "option": "eco_charge",
+    }
+    # Should turn on AC charge.
+    assert len(switch_calls) >= 1
+    assert any(s.data["entity_id"] == "switch.growatt_ac_charge" for s in switch_calls)
+    # Should call Growatt variant service.
+    assert len(growatt_service_calls) >= 1
+
+
+async def test_executor_applies_growatt_idle_command(hass: HomeAssistant) -> None:
+    """Apply Growatt idle command (AUTO mode)."""
+    executor = _build_growatt_executor(hass)
+    execution_plan = ExecutionPlan(
+        slots=[
+            ExecutionSlotCommand(
+                slot_start=dt_util.utcnow(),
+                p_bat_cmd=0,
+                soc_target=50,
+                grid_limit=0,
+                op_mode=OperationMode.AUTO,
+            )
+        ],
+        step_minutes=5,
+        timestamp=dt_util.utcnow(),
+        valid=True,
+    )
+
+    number_calls = async_mock_service(hass, "number", "set_value")
+    select_calls = async_mock_service(hass, "select", "select_option")
+    async_mock_service(hass, "switch", "turn_off")
+    applied = await executor.async_execute_plan(execution_plan)
+
+    assert applied is True
+    # Should set mode to general (idle/auto).
+    assert len(select_calls) == 1
+    assert select_calls[0].data == {
+        "entity_id": "select.growatt_mode",
+        "option": "general",
+    }
+    # Should zero out power settings.
+    assert len(number_calls) == 2
+    powers_set = [c.data["value"] for c in number_calls]
+    assert all(v == 0 for v in powers_set)

@@ -8,12 +8,13 @@ import logging
 from homeassistant.core import HomeAssistant
 
 from .const import GROWATT_VARIANT_MIN, GROWATT_VARIANT_SPH
+from .inverter_interface import InverterControlAdapter
 from .models import ExecutionSlotCommand, OperationMode
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class GrowattControlAdapter:
+class GrowattControlAdapter(InverterControlAdapter):
     """Apply normalized battery commands to Growatt entities/services."""
 
     def __init__(

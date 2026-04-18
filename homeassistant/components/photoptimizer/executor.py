@@ -4,30 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import logging
-from typing import Protocol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .const import (
-    CONF_BATTERY_CHARGE_POWER_MAX,
-    CONF_BATTERY_DISCHARGE_POWER_MAX,
-    CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY,
-    CONF_GROWATT_DEVICE_ID,
-    CONF_GROWATT_INVERTER_VARIANT,
-    CONF_INVERTER_CHARGE_POWER_ENTITY,
-    CONF_INVERTER_DISCHARGE_POWER_ENTITY,
-    CONF_INVERTER_MODE_ENTITY,
-    CONF_INVERTER_TYPE,
-    DEFAULT_BATTERY_CHARGE_POWER_MAX,
-    DEFAULT_BATTERY_DISCHARGE_POWER_MAX,
-    GROWATT_VARIANT_AUTO,
-    INVERTER_TYPE_GOODWE,
-    INVERTER_TYPE_GROWATT,
-)
-from .goodwe_control import GoodweControlAdapter
-from .growatt_control import GrowattControlAdapter
+from .inverter_factory import create_inverter_adapter
 from .models import (
     DeferrableLoadDefinition,
     ExecutionPlan,
@@ -41,13 +23,6 @@ _MAX_ACCEPTABLE_SLOT_AGE = timedelta(minutes=30)
 _LOAD_POWER_THRESHOLD_W = 50.0
 
 
-class _InverterControlAdapter(Protocol):
-    """Protocol for inverter-specific control adapters."""
-
-    async def async_apply(self, command: ExecutionSlotCommand) -> None:
-        """Apply one normalized command."""
-
-
 class PhotoptimizerExecutor:
     """Execute current-slot battery command from normalized execution plan."""
 
@@ -57,7 +32,7 @@ class PhotoptimizerExecutor:
         self._entry = entry
         self._last_signature: tuple[datetime, int, str] | None = None
         self._last_deferrable_signatures: dict[str, bool] = {}
-        self._controller = self._build_controller()
+        self._controller = create_inverter_adapter(hass, entry)
 
     async def async_execute_plan(self, execution_plan: ExecutionPlan | None) -> bool:
         """Apply current command from normalized EMHASS execution plan.
@@ -122,57 +97,6 @@ class PhotoptimizerExecutor:
 
         return applied
 
-    def _build_controller(self) -> _InverterControlAdapter:
-        inverter_type = self._entry.data.get(CONF_INVERTER_TYPE)
-        mode_entity = self._entry.data.get(CONF_INVERTER_MODE_ENTITY)
-        charge_entity = self._entry.data.get(CONF_INVERTER_CHARGE_POWER_ENTITY)
-        discharge_entity = self._entry.data.get(CONF_INVERTER_DISCHARGE_POWER_ENTITY)
-        max_charge_w = float(
-            self._entry.data.get(
-                CONF_BATTERY_CHARGE_POWER_MAX,
-                DEFAULT_BATTERY_CHARGE_POWER_MAX,
-            )
-        )
-        max_discharge_w = float(
-            self._entry.data.get(
-                CONF_BATTERY_DISCHARGE_POWER_MAX,
-                DEFAULT_BATTERY_DISCHARGE_POWER_MAX,
-            )
-        )
-
-        if inverter_type == INVERTER_TYPE_GROWATT:
-            return GrowattControlAdapter(
-                self._hass,
-                mode_entity_id=mode_entity,
-                charge_power_entity_id=charge_entity,
-                discharge_power_entity_id=discharge_entity,
-                ac_charge_switch_entity_id=self._entry.data.get(
-                    CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY
-                ),
-                growatt_device_id=self._entry.data.get(CONF_GROWATT_DEVICE_ID),
-                growatt_variant=self._entry.data.get(
-                    CONF_GROWATT_INVERTER_VARIANT,
-                    GROWATT_VARIANT_AUTO,
-                ),
-                max_charge_power_w=max_charge_w,
-                max_discharge_power_w=max_discharge_w,
-            )
-
-        if inverter_type == INVERTER_TYPE_GOODWE:
-            return GoodweControlAdapter(
-                self._hass,
-                mode_entity_id=mode_entity,
-                charge_power_entity_id=charge_entity,
-                discharge_power_entity_id=discharge_entity,
-                max_charge_power_w=max_charge_w,
-                max_discharge_power_w=max_discharge_w,
-            )
-
-        _LOGGER.warning(
-            "Executor disabled: unsupported inverter type '%s'", inverter_type
-        )
-        return _NoopControlAdapter()
-
     def _select_current_command(
         self,
         execution_plan: ExecutionPlan,
@@ -224,14 +148,3 @@ class PhotoptimizerExecutor:
             return None
 
         return numeric
-
-
-class _NoopControlAdapter:
-    """Safe fallback adapter when control is not configured."""
-
-    async def async_apply(self, command: ExecutionSlotCommand) -> None:
-        _LOGGER.debug(
-            "Noop control adapter: ignoring command mode=%s power=%s",
-            command.op_mode.value,
-            command.p_bat_cmd,
-        )

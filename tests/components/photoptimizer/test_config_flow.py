@@ -23,15 +23,11 @@ from homeassistant.components.photoptimizer.const import (
     CONF_ELECTRICITY_PRICE_ENTITY,
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
-    CONF_HORIZON_HOURS,
     CONF_INVERTER_DISCHARGE_POWER_ENTITY,
     CONF_INVERTER_MODE_ENTITY,
     CONF_INVERTER_TYPE,
     CONF_KWP,
-    CONF_RESOLUTION,
     CONF_WEAR_COST_PER_KWH,
-    DEFAULT_HORIZON_HOURS,
-    DEFAULT_RESOLUTION,
     DOMAIN,
     INVERTER_TYPE_GOODWE,
 )
@@ -128,8 +124,6 @@ async def test_full_user_flow(
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Photoptimizer"
-    assert result["data"][CONF_HORIZON_HOURS] == DEFAULT_HORIZON_HOURS
-    assert result["data"][CONF_RESOLUTION] == DEFAULT_RESOLUTION
     assert result["data"][CONF_ELECTRICITY_PRICE_ENTITY] == "sensor.electricity_price"
     assert result["data"][CONF_LATITUDE] == 49.5962536
     assert result["data"][CONF_LONGITUDE] == 18.3395664
