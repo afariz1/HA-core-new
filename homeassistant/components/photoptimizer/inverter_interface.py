@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
 
 from .models import ExecutionSlotCommand
-
-# Signature shape used by executor to differentiate commands.
-InverterCommandSignature = tuple[datetime, int, str]
 
 
 class InverterControlAdapter(ABC):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import logging
 
 from homeassistant.core import HomeAssistant
@@ -90,8 +89,3 @@ class GoodweControlAdapter(InverterControlAdapter):
     def _to_percent(self, power_w: float, max_power_w: float) -> int:
         normalized = max(0.0, min(100.0, (float(power_w) / max_power_w) * 100.0))
         return int(round(normalized))
-
-    @staticmethod
-    def command_signature(command: ExecutionSlotCommand) -> tuple[datetime, int, str]:
-        """Return an idempotency signature for command deduplication."""
-        return (command.slot_start, command.p_bat_cmd, command.op_mode.value)

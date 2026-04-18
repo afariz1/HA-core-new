@@ -19,7 +19,6 @@ from .const import DOMAIN
 from .coordinator import PhotoptimizerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-_LOGGER.setLevel(logging.DEBUG)
 
 _PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
 _MPC_INTERVAL = timedelta(minutes=5)
@@ -142,7 +141,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     _LOGGER.debug("Scheduling startup bootstrap task")
-    hass.async_create_task(_async_handle_startup())
+    startup_task = hass.async_create_task(_async_handle_startup())
+
+    @callback
+    def _cancel_startup_task() -> None:
+        """Cancel startup task when entry is unloaded."""
+        if not startup_task.done():
+            startup_task.cancel()
+
+    entry.async_on_unload(_cancel_startup_task)
 
     _LOGGER.debug("Setup finished for entry_id=%s", entry.entry_id)
     return True

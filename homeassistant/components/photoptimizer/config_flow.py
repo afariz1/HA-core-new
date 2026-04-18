@@ -184,11 +184,26 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         _LOGGER.debug("Showing PV forecast form")
 
+        default_latitude = (
+            self.hass.config.latitude
+            if self.hass.config.latitude is not None
+            else 49.5962536
+        )
+        default_longitude = (
+            self.hass.config.longitude
+            if self.hass.config.longitude is not None
+            else 18.3395664
+        )
+
         data_schema = vol.Schema(
             {
-                vol.Required(CONF_LATITUDE, default=49.5962536): vol.Coerce(float),
+                vol.Required(CONF_LATITUDE, default=default_latitude): vol.Coerce(
+                    float
+                ),
                 vol.Required(CONF_AZIMUTH, default=124): vol.Coerce(int),
-                vol.Required(CONF_LONGITUDE, default=18.3395664): vol.Coerce(float),
+                vol.Required(CONF_LONGITUDE, default=default_longitude): vol.Coerce(
+                    float
+                ),
                 vol.Required(CONF_KWP, default=6.44): vol.Coerce(float),
                 vol.Required(CONF_DECLINATION, default=40): vol.Coerce(int),
                 vol.Optional(CONF_API_KEY): str,

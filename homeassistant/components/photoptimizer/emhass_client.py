@@ -168,7 +168,7 @@ class EmhassClient:
             return {"number_of_deferrable_loads": 0}
 
         operating_timesteps = [
-            max(1, math.ceil(load.operating_minutes / step_minutes))
+            math.ceil(load.operating_minutes / step_minutes)
             for load in self._deferrable_loads
         ]
         def_current_state = []

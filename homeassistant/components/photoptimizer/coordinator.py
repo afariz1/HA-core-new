@@ -261,56 +261,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         self._log_step_ok("startup_bootstrap")
 
-    def _extract_emhass_battery_schedule(
-        self,
-        table: object,
-        *,
-        value_key: str = "p_batt_forecast",
-    ) -> list[tuple[datetime, float]]:
-        """Extract future battery values from EMHASS dict/list payloads."""
-        schedule: list[tuple[datetime, float]] = []
-        now_utc = dt_util.utcnow().replace(second=0, microsecond=0)
-
-        if isinstance(table, dict):
-            for key, value in table.items():
-                parsed = dt_util.parse_datetime(str(key))
-                numeric = self._coerce_float(value)
-                if parsed is None or numeric is None:
-                    continue
-
-                parsed_utc = dt_util.as_utc(parsed)
-                if parsed_utc < now_utc:
-                    continue
-
-                schedule.append((parsed_utc, numeric))
-
-        elif isinstance(table, list):
-            for row in table:
-                if not isinstance(row, dict):
-                    continue
-
-                parsed = dt_util.parse_datetime(str(row.get("date")))
-                numeric = self._coerce_float(row.get(value_key))
-                if numeric is None:
-                    for row_key, row_value in row.items():
-                        if row_key == "date":
-                            continue
-                        numeric = self._coerce_float(row_value)
-                        if numeric is not None:
-                            break
-
-                if parsed is None or numeric is None:
-                    continue
-
-                parsed_utc = dt_util.as_utc(parsed)
-                if parsed_utc < now_utc:
-                    continue
-
-                schedule.append((parsed_utc, numeric))
-
-        schedule.sort(key=lambda item: item[0])
-        return schedule
-
     def _coerce_float(self, value: object) -> float | None:
         """Convert arbitrary value to float when possible."""
         if isinstance(value, str) or (
@@ -349,25 +299,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         _LOGGER.debug("Entity %s not available after startup wait", entity_id)
         return None
 
-    def _extract_would_apply(
-        self, execution_plan: ExecutionPlan | None
-    ) -> dict[str, Any]:
-        """Extract command preview from normalized execution plan."""
-        if execution_plan is None or not execution_plan.slots:
-            return {
-                "battery_power_w": None,
-                "effective_at": None,
-                "source": "missing_execution_plan",
-            }
-
-        current_slot = execution_plan.slots[0]
-        return {
-            "battery_power_w": current_slot.p_bat_cmd,
-            "effective_at": current_slot.slot_start.isoformat(),
-            "source": execution_plan.source,
-            "valid": execution_plan.valid,
-        }
-
     def _build_result(
         self,
         optimization_inputs: OptimizationInputs,
@@ -401,8 +332,24 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                     if self._last_execution_plan is None
                     else self._last_execution_plan.as_dict()
                 ),
+                "would_apply": (
+                    {
+                        "battery_power_w": None,
+                        "effective_at": None,
+                        "source": "missing_execution_plan",
+                    }
+                    if self._last_execution_plan is None
+                    or not self._last_execution_plan.slots
+                    else {
+                        "battery_power_w": self._last_execution_plan.slots[0].p_bat_cmd,
+                        "effective_at": self._last_execution_plan.slots[
+                            0
+                        ].slot_start.isoformat(),
+                        "source": self._last_execution_plan.source,
+                        "valid": self._last_execution_plan.valid,
+                    }
+                ),
             },
-            "would_apply": self._extract_would_apply(self._last_execution_plan),
             "schedule": {
                 "last_optimization_utc": (
                     None
@@ -456,7 +403,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 horizon_hours,
             )
 
-        bucket_count = max(1, int((horizon_hours * 60) / step_minutes))
+        bucket_count = int((horizon_hours * 60) / step_minutes)
         _LOGGER.debug(
             "Collecting inputs: horizon_hours=%s step_minutes=%s timezone=%s start=%s buckets=%s",
             horizon_hours,
@@ -600,54 +547,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         )
         return len(mapped_hours)
 
-    async def _hourly_from_load_entity(
-        self, entity_id: str, buckets: list[OptimizationBucket]
-    ) -> None:
-        state = await self._async_get_state_with_startup_wait(entity_id)
-
-        if state is None:
-            raise UpdateFailed(f"Load entity {entity_id} not found")
-
-        tz_name = self.entry.data.get(CONF_TIMEZONE) or self.hass.config.time_zone
-        tz = dt_util.get_time_zone(tz_name) or dt_util.UTC
-
-        hour_bucket_index: dict[datetime, list[OptimizationBucket]] = {}
-        for bucket in buckets:
-            hour_start = bucket.start.replace(minute=0, second=0, microsecond=0)
-            hour_bucket_index.setdefault(hour_start, []).append(bucket)
-        bucket_hours = self._bucket_hours(buckets)
-        mapped_points = 0
-
-        for key, value in state.attributes.items():
-            if not isinstance(value, (int, float)):
-                continue
-            dt = dt_util.parse_datetime(str(key))
-            if dt is None:
-                continue
-            dt_local = dt_util.as_local(dt).astimezone(tz)
-            hour_start = dt_local.replace(minute=0, second=0, microsecond=0)
-            target_buckets = hour_bucket_index.get(hour_start)
-            if target_buckets:
-                for bucket in target_buckets:
-                    bucket.load = (float(value) * bucket_hours) / 1000.0
-                mapped_points += 1
-
-        last_load: float | None = None
-        filled_points = 0
-        for bucket in buckets:
-            if bucket.load != 0.0:
-                last_load = bucket.load
-            elif last_load is not None:
-                bucket.load = last_load
-                filled_points += 1
-
-        _LOGGER.debug(
-            "Load timeline populated from %s: mapped=%s forward_filled=%s",
-            entity_id,
-            mapped_points,
-            filled_points,
-        )
-
     async def _hourly_from_forecast_solar(
         self, buckets: list[OptimizationBucket], raw_pv
     ) -> None:
@@ -716,7 +615,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             )
             return
 
-        forecast_power_w = max(buckets[0].pv * 1000.0, 0.0)
         bucket_hours = self._bucket_hours(buckets)
         if bucket_hours <= 0:
             _LOGGER.debug(
@@ -910,15 +808,13 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         """Read and normalize the current battery SOC from Home Assistant."""
         soc_entity = self.entry.data.get(CONF_BATTERY_SOC_ENTITY)
         soc_state = self.hass.states.get(soc_entity) if soc_entity else None
-        try:
-            soc_value = float(soc_state.state) if soc_state and soc_state.state else 0.0
-        except TypeError, ValueError:
-            soc_value = 0.0
+        raw_soc = self._coerce_float(soc_state.state) if soc_state is not None else None
+        if raw_soc is None:
+            normalized_soc = 0.0
+        else:
+            normalized_soc = raw_soc if raw_soc <= 1.0 else raw_soc / 100.0
+            normalized_soc = max(0.0, min(1.0, normalized_soc))
 
-        if soc_value > 1:
-            soc_value = soc_value / 100.0
-
-        normalized_soc = max(0.0, min(1.0, soc_value))
         _LOGGER.debug(
             "Battery SOC read from %s: raw=%s normalized=%s",
             soc_entity,

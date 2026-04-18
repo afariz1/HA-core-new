@@ -16,9 +16,11 @@ from homeassistant.components.photoptimizer.const import (
 )
 from homeassistant.components.photoptimizer.coordinator import PhotoptimizerCoordinator
 from homeassistant.components.photoptimizer.models import (
+    ExecutionPlan,
+    ExecutionSlotCommand,
+    OperationMode,
     OptimizationBucket,
     OptimizationInputs,
-    PublishedEntityState,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -61,6 +63,7 @@ async def test_ml_load_forecast_success(hass: HomeAssistant) -> None:
 
     coordinator.ml_forecast.async_has_sufficient_history = AsyncMock(return_value=True)
     coordinator.ml_forecast.async_train_model = AsyncMock(return_value=True)
+    coordinator.async_build_load_profile = AsyncMock(return_value=[0.5] * 24)
     coordinator.emhass.async_forecast_model_predict = AsyncMock(
         return_value=[1200.0, 800.0]
     )
@@ -193,25 +196,33 @@ async def test_current_solar_bias_correction_ignores_low_forecast(
 async def test_extract_would_apply_supports_battery_scheduled_power_list(
     hass: HomeAssistant,
 ) -> None:
-    """Parse list payload shape used by newer EMHASS battery publish output."""
+    """Expose first execution-plan slot in coordinator result payload."""
     coordinator = _build_coordinator(hass)
     next_slot = dt_util.utcnow().replace(second=0, microsecond=0) + timedelta(minutes=5)
-    published = {
-        "battery_forecast": PublishedEntityState(
-            entity_id="sensor.p_batt_forecast",
-            state=None,
-            attributes={
-                "battery_scheduled_power": [
-                    {
-                        "date": next_slot.isoformat(),
-                        "p_batt_forecast": "321.5",
-                    }
-                ]
-            },
-        )
-    }
+    coordinator._last_execution_plan = ExecutionPlan(
+        slots=[
+            ExecutionSlotCommand(
+                slot_start=next_slot,
+                p_bat_cmd=322,
+                soc_target=60,
+                grid_limit=0,
+                op_mode=OperationMode.FORCED_DISCHARGE,
+            )
+        ],
+        step_minutes=15,
+        timestamp=dt_util.utcnow(),
+        valid=True,
+        source="emhass_publish_entities",
+    )
 
-    result = coordinator._extract_would_apply(published)
+    result = coordinator._build_result(
+        OptimizationInputs(
+            timeline=[],
+            battery_soc=0.5,
+            deferrable_loads=[],
+        ),
+        raw_pv=None,
+    )
 
-    assert result["battery_power_w"] == 321.5
-    assert result["source"] == "forecast_attribute"
+    assert result["emhass"]["would_apply"]["battery_power_w"] == 322
+    assert result["emhass"]["would_apply"]["source"] == "emhass_publish_entities"

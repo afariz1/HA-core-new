@@ -21,6 +21,7 @@ from .models import (
 _LOGGER = logging.getLogger(__name__)
 _MAX_ACCEPTABLE_SLOT_AGE = timedelta(minutes=30)
 _LOAD_POWER_THRESHOLD_W = 50.0
+_FALLBACK_SIGNATURE_SLOT_START = datetime(1970, 7, 24, tzinfo=dt_util.UTC)
 
 
 class PhotoptimizerExecutor:
@@ -29,7 +30,6 @@ class PhotoptimizerExecutor:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize executor for one config entry."""
         self._hass = hass
-        self._entry = entry
         self._last_signature: tuple[datetime, int, str] | None = None
         self._last_deferrable_signatures: dict[str, bool] = {}
         self._controller = create_inverter_adapter(hass, entry)
@@ -42,14 +42,52 @@ class PhotoptimizerExecutor:
         if execution_plan is None:
             return False
 
-        command = self._select_current_command(execution_plan)
+        now_utc = dt_util.utcnow()
+        command = next(
+            (
+                slot
+                for slot in execution_plan.slots
+                if timedelta(0) <= now_utc - slot.slot_start <= _MAX_ACCEPTABLE_SLOT_AGE
+            ),
+            None,
+        )
+        if (
+            command is None
+            and execution_plan.slots
+            and execution_plan.slots[0].slot_start > now_utc
+            and execution_plan.slots[0].slot_start - now_utc
+            <= timedelta(minutes=execution_plan.step_minutes)
+        ):
+            command = execution_plan.slots[0]
+
+        if command is None and execution_plan.slots:
+            _LOGGER.warning(
+                "Executor skipped stale plan slots: plan_ts=%s now=%s source=%s",
+                execution_plan.timestamp.isoformat(),
+                now_utc.isoformat(),
+                execution_plan.source,
+            )
+
         if command is None:
             if not execution_plan.valid:
-                command = self._fallback_command()
+                command = ExecutionSlotCommand(
+                    slot_start=now_utc,
+                    p_bat_cmd=0,
+                    soc_target=0,
+                    grid_limit=0,
+                    op_mode=OperationMode.AUTO,
+                )
             else:
                 return False
 
-        signature = (command.slot_start, command.p_bat_cmd, command.op_mode.value)
+        if not execution_plan.valid and command.op_mode == OperationMode.AUTO:
+            signature = (
+                _FALLBACK_SIGNATURE_SLOT_START,
+                command.p_bat_cmd,
+                command.op_mode.value,
+            )
+        else:
+            signature = (command.slot_start, command.p_bat_cmd, command.op_mode.value)
         if signature == self._last_signature:
             return False
 
@@ -71,8 +109,13 @@ class PhotoptimizerExecutor:
             if published_entity is None:
                 continue
 
-            desired_on = self._current_load_state(published_entity)
-            if desired_on is None:
+            state = published_entity.state
+            if state is None:
+                continue
+
+            try:
+                desired_on = float(state) > _LOAD_POWER_THRESHOLD_W
+            except TypeError, ValueError:
                 continue
 
             if self._last_deferrable_signatures.get(load.entity_id) == desired_on:
@@ -96,55 +139,3 @@ class PhotoptimizerExecutor:
             )
 
         return applied
-
-    def _select_current_command(
-        self,
-        execution_plan: ExecutionPlan,
-    ) -> ExecutionSlotCommand | None:
-        """Select the nearest command slot from a normalized execution plan."""
-        if not execution_plan.slots:
-            return None
-
-        now_utc = dt_util.utcnow()
-        for slot in execution_plan.slots:
-            if now_utc - slot.slot_start <= _MAX_ACCEPTABLE_SLOT_AGE:
-                return slot
-
-        _LOGGER.warning(
-            "Executor skipped stale plan slots: plan_ts=%s now=%s source=%s",
-            execution_plan.timestamp.isoformat(),
-            now_utc.isoformat(),
-            execution_plan.source,
-        )
-        return None
-
-    def _fallback_command(self) -> ExecutionSlotCommand:
-        return ExecutionSlotCommand(
-            slot_start=dt_util.utcnow(),
-            p_bat_cmd=0,
-            soc_target=0,
-            grid_limit=0,
-            op_mode=OperationMode.AUTO,
-        )
-
-    def _current_load_state(
-        self, published_entity: PublishedEntityState
-    ) -> bool | None:
-        """Return desired on/off state from EMHASS load forecast."""
-        power = self._coerce_load_power(published_entity.state)
-        if power is None:
-            return None
-
-        return power > _LOAD_POWER_THRESHOLD_W
-
-    def _coerce_load_power(self, value: str | None) -> float | None:
-        """Convert EMHASS load forecast state to Watts when possible."""
-        if value is None:
-            return None
-
-        try:
-            numeric = float(value)
-        except TypeError, ValueError:
-            return None
-
-        return numeric
